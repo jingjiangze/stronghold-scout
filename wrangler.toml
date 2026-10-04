@@ -3,9 +3,9 @@ main = "worker.mjs"
 compatibility_date = "2026-09-01"
 compatibility_flags = ["nodejs_compat"]
 
-# 每天 4 轮（UTC 00/06/12/18 = 北京 08/14/20/02）；手工触发：GET /run?key=$SCOUT_TOKEN（?dry=1 只报告不投递）
-[triggers]
-crons = ["0 */6 * * *"]
+# 不配 cron：CF 原生定时在这个账户上列得出来却从不触发（R2 台账的 lastRun 停在人工触发那一刻）。
+# 实际调度由 GitHub Actions 的 scout-schedule.yml 每天 4 次（17 1,7,13,19 UTC）打 Worker。
+# 手工触发：GET /run?key=$SCOUT_TOKEN（?dry=1 只报告不投递）、/probe、/ledger、/ingest。
 
 # 只写 scout/ 前缀（state + last-report）；site/servers.json 由维护者签名发布，脚本不碰
 [[r2_buckets]]
