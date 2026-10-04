@@ -99,6 +99,9 @@ if (gate.due) {
     commentPages: Number(process.env.COMMENT_PAGES || 12),
     forkPages: Number(process.env.FORK_PAGES || 2),
     readmeScanMax: Number(process.env.README_SCAN_MAX || 15),
+    // 跨洋 + 撞上 WAF 时 6 秒不够：超时太紧会让评论渠道静默退化成「未登录 3 条」，
+    // 台账里连时间水位都留不下。宁可单轮慢一点。
+    fetchTimeoutMs: Number(process.env.FETCH_TIMEOUT_MS || 12000),
   },
   deliver: DRY ? undefined : ingestDeliver(),
   secrets: { biliCookie: process.env.BILI_COOKIE || '', githubToken: process.env.GITHUB_TOKEN || '' },
