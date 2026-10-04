@@ -60,7 +60,6 @@ const state = await loadLedger();
    都没动静就直接收工（一轮 ~40 秒），只在真有可能新东西时才做完整采集。
    FORCE_CRAWL=1 可绕过。 */
 async function deltaDue(state) {
-  if (process.env.FORCE_CRAWL === '1') return { due: true, why: 'FORCE_CRAWL' };
   const now = Date.now();
   const aid = (process.env.BILI_OID || '117371003995662');
   let count = null;
@@ -72,10 +71,11 @@ async function deltaDue(state) {
     const j = await r.json();
     count = j && j.data && (j.data.count ?? j.data.total);
   } catch (e) { console.log('[actions] 评论数取不到，按有声静处理：', String(e.message).slice(0, 40)); }
-  if (count == null) return { due: true, why: '评论数不可用' };
   const prev = Number(state.biliCount) || 0;
-  if (!prev || Number(count) !== prev) { state.biliCount = Number(count); return { due: true, why: `评论数 ${prev} → ${count}` }; }
-  state.biliCount = Number(count);
+  if (count != null) state.biliCount = Number(count);   // 无论跑不跑都记水位
+  if (process.env.FORCE_CRAWL === '1') return { due: true, why: `FORCE_CRAWL（评论数 ${prev} → ${count ?? '?'} 已记入台账）` };
+  if (count == null) return { due: true, why: '评论数不可用' };
+  if (!prev || Number(count) !== prev) return { due: true, why: `评论数 ${prev} → ${count}` };
   const ghGap = (process.env.GITHUB_INTERVAL_MIN || 180) * 60000;
   if (!state.githubAt || now - state.githubAt >= ghGap) return { due: true, why: 'fork 扫描到期' };
   const retry = (process.env.CANDIDATE_RETRY_MIN || 120) * 60000;
