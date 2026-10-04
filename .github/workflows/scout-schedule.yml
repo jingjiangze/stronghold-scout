@@ -9,8 +9,13 @@ on:
     - cron: '17 1,7,13,19 * * *'
   workflow_dispatch:
     inputs:
+      target:
+        description: '调哪个端点：run=扫一轮，probe=渠道探针'
+        type: choice
+        default: run
+        options: [run, probe]
       dry:
-        description: '只报告和校验，不投递/不发布'
+        description: '只报告和校验，不投递/不发布（仅 target=run 有效）'
         type: boolean
         default: false
 
@@ -24,14 +29,16 @@ jobs:
   sweep:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      EP: ${{ github.event.inputs.target || 'run' }}
     steps:
-      - name: Trigger stronghold-scout worker
+      - name: Call stronghold-scout worker
         env:
           SCOUT_KEY: ${{ secrets.SCOUT_TOKEN }}
           DRY: ${{ github.event.inputs.dry == 'true' && '&dry=1' || '' }}
         run: |
           set -euo pipefail
-          url="https://stronghold-scout.yuehuibu5561.workers.dev/run?ts=$(date -u +%s)${DRY}"
+          url="https://stronghold-scout.yuehuibu5561.workers.dev/${EP}?ts=$(date -u +%s)${DRY}"
           code=$(curl -sS -o resp.json -w '%{http_code}' \
             --max-time 780 --retry 2 --retry-delay 30 \
             -H "x-scout-key: ${SCOUT_KEY}" -H 'accept: application/json' "$url") || code=000
@@ -44,23 +51,31 @@ jobs:
           cat > summary.js <<'JS'
           const fs = require('fs');
           const r = JSON.parse(fs.readFileSync('resp.json', 'utf8'));
-          const sub = r.submitted || [];
-          const c = r.configured || {};
-          const lines = [
-            `- 扫描：${r.startedAt} → ${r.finishedAt}（${((r.durationMs || 0) / 1000).toFixed(0)}s）`,
-            `- 候选 ${r.discovered ?? '?'} | 验活 ${r.verified ?? '?'} | 本轮投递 ${sub.length}`,
-            `- 已在清单 ${r.alreadyListed ?? 0} | 队列去重 ${r.skippedQueued ?? 0} | 延后 ${r.deferred ?? 0} | 截断 ${r.truncated ? '是' : '否'}`,
-            `- 渠道：githubToken=${c.githubToken} biliCookie=${c.biliCookie} autoPublish=${c.autoPublish} 视频数=${c.videos}`,
-            `- 台账：候选 ${r.candidates ?? '?'} 条 | seen ${r.stateSize && r.stateSize.seen} | submitted ${r.stateSize && r.stateSize.submitted}`,
-          ];
-          if (r.fatal) lines.push(`- **致命错误**：${String(r.fatal).slice(0, 300)}`);
-          for (const s of sub) lines.push(`  - ${s.url} → ${s.mode || 'queued'}${s.detail && s.detail.sha256 ? ' sha256 ' + String(s.detail.sha256).slice(0, 12) : ''}`);
-          if (!sub.length) lines.push('  - （本轮没有新服务器上线）');
-          if ((r.errors || []).length) lines.push(`- 异常：${String(r.errors.join(' | ')).slice(0, 300)}`);
-          const hosts = (r.rejected || []).map(x => { try { return new URL(x.origin).host; } catch { return String(x.origin).slice(0, 30); } });
-          if (hosts.length) lines.push(`- 未通过 ${hosts.length} 个：${hosts.join(', ').slice(0, 300)}`);
-          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join('\n') + '\n');
-          console.log(lines.join('\n'));
+          const L = [];
+          if (process.env.EP === 'probe') {
+            L.push(`- 探针时间：${r.at} | 带 cookie：${r.hasCookie}`);
+            L.push('| 入口 | HTTP | code | 主楼数 | acount | 耗时 | 命中链接 / 置顶 |');
+            L.push('| --- | --- | --- | --- | --- | --- | --- |');
+            for (const x of r.rows || []) {
+              L.push(`| ${x.name} | ${x.status ?? '-'} | ${x.code ?? (x.error || '')} | ${x.replies ?? '-'} | ${x.acount ?? '-'} | ${x.ms ?? '-'}ms | ${(x.links || []).slice(0, 2).join(' ')}${x.upper ? ' 置顶:' + x.upper.slice(0, 40) : ''} |`);
+            }
+          } else {
+            const sub = r.submitted || [];
+            const c = r.configured || {};
+            L.push(`- 扫描：${r.startedAt} → ${r.finishedAt}（${((r.durationMs || 0) / 1000).toFixed(0)}s）`);
+            L.push(`- 候选 ${r.discovered ?? '?'} | 验活 ${r.verified ?? '?'} | 本轮投递 ${sub.length}`);
+            L.push(`- 已在清单 ${r.alreadyListed ?? 0} | 队列去重 ${r.skippedQueued ?? 0} | 延后 ${r.deferred ?? 0} | 截断 ${r.truncated ? '是' : '否'}`);
+            L.push(`- 渠道：githubToken=${c.githubToken} biliCookie=${c.biliCookie} autoPublish=${c.autoPublish} 视频数=${c.videos}`);
+            L.push(`- 台账：候选 ${r.candidates ?? '?'} 条 | seen ${r.stateSize && r.stateSize.seen} | submitted ${r.stateSize && r.stateSize.submitted}`);
+            if (r.fatal) L.push(`- **致命错误**：${String(r.fatal).slice(0, 300)}`);
+            for (const s of sub) L.push(`  - ${s.url} → ${s.mode || 'queued'}${s.detail && s.detail.sha256 ? ' sha256 ' + String(s.detail.sha256).slice(0, 12) : ''}`);
+            if (!sub.length) L.push('  - （本轮没有新服务器上线）');
+            if ((r.errors || []).length) L.push(`- 异常：${String(r.errors.join(' | ')).slice(0, 300)}`);
+            const hosts = (r.rejected || []).map((x) => { try { return new URL(x.origin).host; } catch { return String(x.origin).slice(0, 30); } });
+            if (hosts.length) L.push(`- 未通过 ${hosts.length} 个：${hosts.join(', ').slice(0, 300)}`);
+          }
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, L.join('\n') + '\n');
+          console.log(L.join('\n'));
           JS
           node summary.js
           if [ -n "${DRY:-}" ]; then echo '::warning::dry run，未投递'; fi

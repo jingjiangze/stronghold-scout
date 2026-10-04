@@ -19,7 +19,7 @@ export const DEFAULTS = {
   reviewUrl: 'https://dl.jiangjiangze.icu/api/servers/review',
   probePaths: ['/healthz', '/api/status', '/health'],   // raiya 这类挂在子路径/改名健康检查的服要靠这个才收得进来
   clientMounts: ['/play', '/game', '/app', '/covenant', '/'],  // 客户端本体的常见挂载点
-  videos: [{ aid: '117371003995662', cid: '42396680690', note: '主视频' }],
+  videos: [{ aid: '117371003995662', cid: '42396680690', bvid: 'BV1QoaU6gEF2', note: '主视频' }],
   repoQueries: ['卫戍协议', 'stronghold protocol arknights'],
   /* 人工观察名单：现在还没过指纹，但已经在跑别的形态（登录门、状态站…）。
      每轮复探，哪天它开出合法的 /healthz 就会被自动收进清单。 */
@@ -292,6 +292,100 @@ async function fromBiliSearch(ctx) {
     }
   }
   return found;
+}
+
+/* ---- 渠道探针：从 Cloudflare 出口实测 B 站各个评论入口的可用性与指纹要求 ---- */
+const BILI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const BILI_BASE = { referer: 'https://www.bilibili.com/', origin: 'https://www.bilibili.com' };
+
+/** browser=true 时补浏览器级指纹（UA / sec-fetch / sec-ch-ua）。Worker 裸 fetch 的 UA 是 Cloudflare-Worker。 */
+export function biliHeaders(cookie, browser) {
+  if (!browser) return { ...BILI_BASE, ...(cookie ? { cookie } : {}) };
+  return { ...BILI_BASE,
+    'user-agent': BILI_UA,
+    accept: 'application/json, text/plain, */*',
+    'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-site', 'sec-fetch-dest': 'empty',
+    'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'sec-ch-ua-mobile': '?0', 'sec-ch-ua-platform': '"Windows"',
+    'cache-control': 'no-cache', pragma: 'no-cache',
+    ...(cookie ? { cookie } : {}) };
+}
+
+async function wbiMixin(fetchImpl, headers) {
+  const nav = await getJson(fetchImpl, 'https://api.bilibili.com/x/web-interface/nav', headers);
+  const img = nav?.data?.wbi_img?.img_url?.split('/').pop()?.split('.')[0];
+  const sub = nav?.data?.wbi_img?.sub_url?.split('/').pop()?.split('.')[0];
+  if (!img || !sub) return '';
+  const raw = img + sub;
+  let mixin = '';
+  for (const i of MIXIN_INDEX) if (raw[i]) mixin += raw[i];
+  return mixin.slice(0, 32);
+}
+
+/** WBI 签名后的完整地址（与搜索渠道同一套编码规则）。 */
+async function wbiUrl(fetchImpl, base, params, headers) {
+  const mixin = await wbiMixin(fetchImpl, headers);
+  if (!mixin) return '';
+  const p = new URLSearchParams(params);
+  p.set('wts', String(Math.floor(Date.now() / 1000)));
+  const q = [...p.entries()].sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([k, v]) => `${k}=${encodeURIComponent(v).replace(/!/g, '%21').replace(/'/g, '%27').replace(/\(/g, '%28').replace(/\)/g, '%29').replace(/~/g, '%7E')}`).join('&');
+  p.set('w_rid', createHash('md5').update(q + mixin).digest('hex'));
+  return base + '?' + p.toString();
+}
+
+export async function biliProbe(fetchImpl, cookie) {
+  const { aid, cid, bvid } = DEFAULTS.videos[0];
+  const out = [];
+  const hit = async (name, url, headers) => {
+    if (!url) { out.push({ name, error: '地址为空（WBI 取密钥失败）' }); return; }
+    const t0 = Date.now();
+    try {
+      const res = await fetchImpl(url, { headers });
+      const text = await res.text();
+      const row = { name, status: res.status, ms: Date.now() - t0, ct: (res.headers.get('content-type') || '').slice(0, 28) };
+      let j = null; try { j = JSON.parse(text); } catch { /* xml/html */ }
+      if (j) {
+        row.code = j.code; row.msg = String(j.message || '').slice(0, 26);
+        const reps = (j.data && j.data.replies) || [];
+        row.replies = Array.isArray(reps) ? reps.length : 0;
+        if (j.data && j.data.page) row.acount = j.data.page.acount;
+        if (j.data && j.data.cursor && j.data.cursor.is_end) row.isEnd = true;
+        const upper = j.data && j.data.upper && j.data.upper.top && j.data.upper.top.content
+          ? j.data.upper.top.content.message : '';
+        if (upper) row.upper = String(upper).replace(/\s+/g, ' ').slice(0, 90);
+        const tops = ((j.data && j.data.top_replies) || []).map((x) => (x.content && x.content.message) || '').join(' | ');
+        if (tops) row.topReplies = tops.replace(/\s+/g, ' ').slice(0, 90);
+        const urls = new Set();
+        for (const r of Array.isArray(reps) ? reps : []) {
+          linksIn(((r.content && r.content.message) || '') + ' ' + ((r.replies || []).map((s) => (s.content && s.content.message) || '').join(' ')), urls);
+        }
+        row.links = [...urls].slice(0, 6);
+        if (Array.isArray(reps) && reps[0]) row.rpid = reps[0].rpid;
+      } else row.sample = text.replace(/\s+/g, ' ').slice(0, 90);
+      out.push(row);
+    } catch (e) { out.push({ name, error: String((e && e.name) || e).slice(0, 40) }); }
+  };
+  const q = (sort, pn) => `https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&sort=${sort}&pn=${pn}&ps=20`;
+  await hit('1 未登录+裸referer', q(2, 1), biliHeaders(''));
+  await hit('2 cookie+裸referer（云端现状）', q(2, 1), biliHeaders(cookie));
+  await hit('3 cookie+浏览器指纹', q(2, 1), biliHeaders(cookie, true));
+  await hit('4 无cookie+浏览器指纹', q(2, 1), biliHeaders('', true));
+  await hit('5 cookie+浏览器 p6', q(2, 6), biliHeaders(cookie, true));
+  await hit('6 cookie+浏览器 p30', q(2, 30), biliHeaders(cookie, true));
+  await hit('7 cookie+浏览器 热度序', q(0, 1), biliHeaders(cookie, true));
+  await hit('8 wbi /reply/wbi/main mode=2', await wbiUrl(fetchImpl, 'https://api.bilibili.com/x/v2/reply/wbi/main', { oid: aid, type: '1', mode: '2', next: '0' }, biliHeaders(cookie, true)), biliHeaders(cookie, true));
+  const root = (out.find((r) => r.rpid) || {}).rpid;
+  if (root) await hit(`9 楼中楼 /reply/reply root=${root}`, `https://api.bilibili.com/x/v2/reply/reply?type=1&oid=${aid}&root=${root}&pn=1&ps=20`, biliHeaders(cookie, true));
+  await hit('10 弹幕 XML', `https://comment.bilibili.com/${cid}.xml`, biliHeaders('', true));
+  await hit('11 相关视频列表', `https://api.bilibili.com/x/web-interface/archive/related?bvid=${bvid}`, biliHeaders('', true));
+  await hit('12 视频详情(简介/cid/staff)', `https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`, biliHeaders('', true));
+  const ap = new URLSearchParams({ type: '1', oid: String(aid), pn: '1', ps: '20', sort: '2', appkey: '1d8b6e3d45233436', mobi_app: 'android', build: '7670000', platform: 'android', channel: 'bilibili' });
+  const aq = [...ap.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  ap.set('sign', createHash('md5').update(aq + 'c75875c5a694e20bd91e0d327996991d').digest('hex'));
+  await hit('13 App 端 /x/v2/reply', 'https://app.bilibili.com/x/v2/reply?' + ap.toString(), { 'user-agent': 'bili_android/7.67.0 os/android model/Pixel 5' });
+  return { at: new Date().toISOString(), hasCookie: !!cookie, rows: out };
 }
 
 /* ---- 主流程 ---- */

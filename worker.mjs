@@ -7,7 +7,7 @@
      SCOUT_TOKEN    必填，手工触发 /run 用的口令
    R2 绑定 SCOUT → bucket stronghold-assets，只写 scout/ 前缀（site/servers.json 由维护者签名发布，本脚本不碰）
    ========================================================================================== */
-import { runScout, DEFAULTS } from './scout.mjs';
+import { runScout, DEFAULTS, biliProbe } from './scout.mjs';
 import { createPublisher } from './publisher.mjs';
 
 const STATE_KEY = 'scout/state.json';
@@ -67,6 +67,14 @@ export default {
           liveCount: doc.servers?.length, liveUpdated: doc.updated, crossVerify: p.verifyDoc(doc), canonicalSha: p.canonicalSha(doc) }, null, 2),
           { headers: { 'content-type': 'application/json' } });
       } catch (e) { return new Response(JSON.stringify({ error: String(e && e.stack || e) }), { status: 500, headers: { 'content-type': 'application/json' } }); }
+    }
+    if (url.pathname === '/probe') {
+      // 渠道探针：从 CF 出口实测 B 站各评论入口（结果同时落 R2，本机 workers.dev 被中间盒掐时用域名读）
+      try {
+        const probe = await biliProbe((u, i) => fetch(u, { ...(i || {}), signal: AbortSignal.timeout(15000) }), env.BILI_COOKIE || '');
+        await env.SCOUT.put('scout/probe.json', JSON.stringify(probe, null, 1), { httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=30' } });
+        return new Response(JSON.stringify(probe, null, 2), { headers: { 'content-type': 'application/json' } });
+      } catch (e) { return new Response(JSON.stringify({ error: String((e && e.stack) || e) }), { status: 500, headers: { 'content-type': 'application/json' } }); }
     }
     if (url.pathname === '/state') {
       const body = await env.SCOUT.get(STATE_KEY);
