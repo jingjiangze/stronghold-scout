@@ -247,7 +247,7 @@ async function fromBiliComments(ctx) {
   const headers = { referer: 'https://www.bilibili.com/', ...(cookie ? { cookie } : {}) };
   for (const v of ctx.cfg.videos) {
     for (const sort of [0, 2]) {
-      for (let pn = 1; pn <= (cookie ? cfg.commentPages : 1); pn++) {
+      for (let pn = 1; pn <= (cookie ? ctx.cfg.commentPages : 1); pn++) {
         const d = await getJson(ctx.fetch, `https://api.bilibili.com/x/v2/reply?type=1&oid=${v.aid}&sort=${sort}&pn=${pn}&ps=20`, headers);
         const reps = d && d.data && d.data.replies;
         if (!Array.isArray(reps)) break;
