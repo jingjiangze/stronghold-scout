@@ -548,7 +548,12 @@ export async function runScout(options = {}) {
   const liveList = (liveDoc && liveDoc.servers) || [];
   const live = new Set(liveList.map(s => s.url));
   /* 同一站点挂不同 path 只算一台：按 host 去重，避免把 raiya 的 /play 与 /?room=… 当成两家 */
-  const liveHosts = new Set(liveList.map(s => { try { return new URL(s.url).host; } catch { return ''; } }).filter(Boolean));
+  // 「同一台服务器」的判据：同 host 且有一方是根路径（?room= 深链归一后就是根），或者两边子路径相同。
+  // 只看 host 会把同一域名下不同子路径的另一台实例误判成重复；完全不看 host 又会让深链变成新条目。
+  const splitUrl = (u) => { try { const x = new URL(u); const p = x.pathname.replace(/\/+$/, ''); return { host: x.host, path: p || '/' }; } catch { return null; } };
+  const listed = liveList.map((u) => splitUrl(u && u.url)).filter(Boolean);
+  const alreadyListed = (u) => { const x = splitUrl(u); if (!x) return false;
+    return listed.some((y) => y.host === x.host && (x.path === y.path || x.path === '/' || y.path === '/')); };
   if (!live.size) report.errors.push('线上清单读取失败，本轮不提交以免重复入队');
 
   const src = { cfg, fetch: fetchImpl, secrets, state };
@@ -578,7 +583,7 @@ export async function runScout(options = {}) {
   for (const [origin, source] of candidates) {
     if (probed++ >= cfg.maxCandidates || Date.now() - now > (cfg.budgetMs || 90e3)) { report.truncated = true; break; }
     let hostKey = ''; try { hostKey = new URL(origin).host; } catch { /* ignore */ }
-    if (live.has(origin) || liveHosts.has(hostKey)) { state.seen[origin] = { ...(state.seen[origin] || {}), lastSeenLive: now, at: now }; continue; }
+    if (alreadyListed(origin)) { state.seen[origin] = { ...(state.seen[origin] || {}), lastSeenLive: now, at: now }; continue; }
     const C = state.candidates = state.candidates || {};
     if (!C[origin]) C[origin] = { firstSeen: now, source, probes: 0 };
     // 30 分钟一轮时，把已经死掉两周的地址每轮重探纯属烧 runner 时间：
@@ -608,7 +613,7 @@ export async function runScout(options = {}) {
     if (report.submitted.length >= cfg.maxSubmitsPerRun) { report.deferred = (report.deferred || 0) + 1; continue; }
     const id = cleanId(new URL(origin).hostname.split('.')[0]) || `srv-${Object.keys(state.seen).length}`;
     const entryUrl = resolved.clientUrl || origin;
-    if (live.has(entryUrl) || liveHosts.has(new URL(entryUrl).host)) { report.alreadyListed = (report.alreadyListed || 0) + 1; continue; }
+    if (alreadyListed(entryUrl)) { report.alreadyListed = (report.alreadyListed || 0) + 1; continue; }
     const entry = { id, name: `${new URL(origin).hostname}（待核）`, url: entryUrl, probe: resolved.probePath,
                     enabled: true, note: cleanNote(`自动发现 · ${source}`) };
     if (options.dryRun) { report.submitted.push({ ...entry, dryRun: true, verdict }); continue; }
