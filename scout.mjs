@@ -32,6 +32,8 @@ export const DEFAULTS = {
   forkPages: 2,
   readmeScanMax: 15,
   githubIntervalMin: 180,   // fork 枚举/README/仓库搜索的节流间隔（分钟）
+  biliCookieIntervalMin: 180, // 带 cookie 的评论区深翻每 3 小时才做一轮（风控按账号计）
+  biliBanOffHours: 6,         // 撞到 -412 后退避多久
   expandRelated: true,     // 把二创/教程视频的评论区也纳进来
   maxRelatedVideos: 6,      // 每轮最多额外带几个相关视频
   hotPages: 3,              // 热度序评论浅翻；新服基本只出现在按时间序的前几页
@@ -52,6 +54,8 @@ const HEALTH_FIELDS = ['uptimeSec', 'sockets', 'sessions', 'rooms', 'matches', '
 const SKIP_HOST = [/\.github\.io$/i, /\.pages\.dev$/i, /\.vercel\.app$/i, /\.netlify\.(app|site)$/i,
                    /\.gitlab\.io$/i, /^raw\.githubusercontent\.com$/i, /^github\.com$/i, /^gitee\.com$/i,
                    /\.bilibili\.com$/i, /^b23\.tv$/i, /(^|\.)163\.com$/i, /(^|\.)music\.com$/i,
+                   /(^|\.)ax1x\.com$/i, /(^|\.)imgchr\.com$/i, /(^|\.)smms\.app$/i,
+                   /(^|\.)image\.tm$/i, /(^|\.)staticflickr\.com$/i, /(^|\.)lanzou[a-z]*\.com$/i,
                    /(^|\.)pan\.baidu\.com$/i, /(^|\.)123pan\.cn$/i, /(^|\.)quark\.cn$/i, /(^|\.)docs\.qq\.com$/i,
                    /(^|\.)taptap\.cn$/i, /(^|\.)nga\.cn$/i, /(^|\.)nodejs\.org$/i, /(^|\.)npmmirror\.com$/i,
                    /(^|\.)shields\.io$/i, /(^|\.)example\.com$/i, /(^|\.)hypergryph\.com$/i,
@@ -277,6 +281,17 @@ async function relatedVideos(ctx) {
 async function fromBiliComments(ctx) {
   const found = new Map();
   const cookie = ctx.secrets.biliCookie;
+  // B 站风控按账号/会话计，不看出口：今天浏览器 + 本机 + 云端连着翻同一个视频的评论区，
+  // 三个出口全吃了 -412。所以带 cookie 的深翻页必须自我限流，撞封禁就主动退避几小时，
+  // 把「每小时都去敲门」改成「隔几小时一次」；不带 cookie 的公开位渠道不受影响。
+  const banUntil = Number(ctx.state.biliBanUntil) || 0;
+  const gapMs = (ctx.cfg.biliCookieIntervalMin || 0) * 60000;
+  if (cookie && banUntil > Date.now()) { ctx.state.biliSkip = { at: Date.now(), why: '封禁退避中，剩 ' + Math.round((banUntil - Date.now()) / 60000) + ' 分钟' }; return found; }
+  if (cookie && gapMs && ctx.state.biliCookieAt && Date.now() - ctx.state.biliCookieAt < gapMs) {
+    ctx.state.biliSkip = { at: Date.now(), why: '距上次 cookie 翻页不足 ' + ctx.cfg.biliCookieIntervalMin + ' 分钟' };
+    return found;
+  }
+  if (cookie) ctx.state.biliCookieAt = Date.now();
   const headers = biliHeaders(cookie, true);
   // 时间水位：上一轮已经翻到过的评论时间戳。按时间序翻页时，一旦某页出现比水位更早的
   // 评论就说明已经翻过重复区，直接停 —— 30 分钟一轮靠这个把每轮请求数压到个位数。
@@ -293,6 +308,11 @@ async function fromBiliComments(ctx) {
       let repeat = false;
       for (let pn = 1; pn <= depth && !repeat; pn++) {
         const d = await getJson(ctx.fetch, `https://api.bilibili.com/x/v2/reply?type=1&oid=${v.aid}&sort=${sort}&pn=${pn}&ps=20`, headers);
+        if (d && d.code === -412) {
+          ctx.state.biliBanUntil = Date.now() + (ctx.cfg.biliBanOffHours || 6) * 3600e3;
+          ctx.state.biliSkip = { at: Date.now(), why: '命中 -412，退避 ' + (ctx.cfg.biliBanOffHours || 6) + ' 小时' };
+          break;
+        }
         const reps = d && d.data && d.data.replies;
         if (!Array.isArray(reps)) break;
         for (const c of reps) {
