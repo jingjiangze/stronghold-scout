@@ -13,7 +13,7 @@ on:
         description: '调哪个端点：run=扫一轮，probe=渠道探针'
         type: choice
         default: run
-        options: [run, probe]
+        options: [run, probe, bili]
       dry:
         description: '只报告和校验，不投递/不发布（仅 target=run 有效）'
         type: boolean
@@ -79,3 +79,51 @@ jobs:
           JS
           node summary.js
           if [ -n "${DRY:-}" ]; then echo '::warning::dry run，未投递'; fi
+
+  # B 站风控看的是出口 IP：Cloudflare 全线 412，GitHub Actions 的出口是不是也被拉黑决定
+  # 「云端读评论区」到底能不能落地。只在手工选 bili 时跑，不进定时。
+  bili-egress:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'bili'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe bilibili from Actions egress
+        env:
+          CK: ${{ secrets.BILI_COOKIE }}
+        run: |
+          set -uo pipefail
+          cat > p.js <<'JS'
+          const UA = {
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            referer: 'https://www.bilibili.com/', origin: 'https://www.bilibili.com',
+            accept: 'application/json, text/plain, */*', 'accept-language': 'zh-CN,zh;q=0.9',
+            'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-site', 'sec-fetch-dest': 'empty',
+          };
+          const ck = process.env.CK || '';
+          const aid = '117371003995662';
+          const rows = [];
+          const hit = async (name, url, withCookie) => {
+            const h = { ...UA, ...(withCookie && ck ? { cookie: ck } : {}) };
+            try {
+              const r = await fetch(url, { headers: h, signal: AbortSignal.timeout(12000) });
+              const t = await r.text();
+              let j = null; try { j = JSON.parse(t); } catch { /* html */ }
+              rows.push({ name, http: r.status, code: j ? j.code : 'html',
+                replies: j && j.data && Array.isArray(j.data.replies) ? j.data.replies.length : 0,
+                acount: j && j.data && j.data.page ? j.data.page.acount : null });
+            } catch (e) { rows.push({ name, http: 'ERR ' + String(e.name || e).slice(0, 20) }); }
+          };
+          const q = (pn) => `https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&sort=2&pn=${pn}&ps=20`;
+          await hit('未登录 p1', q(1), false);
+          await hit('带 cookie p1', q(1), true);
+          await hit('带 cookie p30', q(30), true);
+          await hit('view 详情', 'https://api.bilibili.com/x/web-interface/view?bvid=BV1QoaU6gEF2', false);
+          await hit('弹幕 XML', 'https://comment.bilibili.com/42396680690.xml', false);
+          await hit('搜索 WBI 前的 nav', 'https://api.bilibili.com/x/web-interface/nav', false);
+          const md = ['| 入口 | HTTP | code | 主楼数 | acount |', '| --- | --- | --- | --- | --- |'];
+          for (const x of rows) md.push(`| ${x.name} | ${x.http} | ${x.code ?? '-'} | ${x.replies} | ${x.acount ?? '-'} |`);
+          md.push('', `- cookie 是否注入：${ck ? 'yes len ' + ck.length : 'NO（仓库没配 BILI_COOKIE secret）'}`);
+          require('fs').appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
+          console.log(JSON.stringify(rows, null, 1));
+          JS
+          node p.js
