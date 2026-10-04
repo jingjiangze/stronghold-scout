@@ -502,6 +502,11 @@ export async function runScout(options = {}) {
   }
   /* 之前收下的候选 + 人工观察名单，每轮复探一次（本轮新发现的优先） */
   for (const [origin, c] of Object.entries(state.candidates || {})) {
+    // 收紧 SKIP_HOST 之前存进台账的噪声（图床、直播间、UP 主空间、网盘…）不该继续占每轮配额：
+    // 复探注入这条路不过 normalizeCandidate，所以这里补一道同样的过滤并顺手清账。
+    let needle = '';
+    try { needle = new URL(origin).hostname; } catch { needle = ''; }
+    if (!needle || SKIP_HOST.some((re) => re.test(needle))) { delete state.candidates[origin]; continue; }
     if (!candidates.has(origin) && !live.has(origin)) candidates.set(origin, c.source || '候选台账');
   }
   for (const seed of cfg.seeds || []) {
