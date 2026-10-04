@@ -1,0 +1,6 @@
+# 本地密钥与运行态，一律不进仓库
+.dev.vars
+.wrangler/
+scout-state.json
+*.log
+node_modules/

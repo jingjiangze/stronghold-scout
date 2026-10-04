@@ -1,0 +1,20 @@
+name = "stronghold-scout"
+main = "worker.mjs"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 每天 4 轮（UTC 00/06/12/18 = 北京 08/14/20/02）；手工触发：GET /run?key=$SCOUT_TOKEN（?dry=1 只报告不投递）
+[triggers]
+crons = ["0 */6 * * *"]
+
+# 只写 scout/ 前缀（state + last-report）；site/servers.json 由维护者签名发布，脚本不碰
+[[r2_buckets]]
+binding = "SCOUT"
+bucket_name = "stronghold-assets"
+
+[vars]
+SCOUT_LOG_LEVEL = "info"
+# 打开自动投递：发现的新地址会 POST 到 /api/servers/submit 进待审队列（不直接发布）
+AUTO_SUBMIT = "1"
+# 1 = 发现即上线（submit→approve→本机重签 PUT），需要 secret SP_SIGN_KEY + PUBLISH_KEY；否则自动退回「只入队」
+AUTO_PUBLISH = "1"
