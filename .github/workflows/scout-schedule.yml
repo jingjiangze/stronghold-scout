@@ -31,6 +31,8 @@ concurrency:
 jobs:
   crawl:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'crawl')
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 14
     steps:
