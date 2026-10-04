@@ -1,0 +1,59 @@
+name: scout-schedule
+
+# CF 原生 cron 在这个账户上不触发（schedules 列得出来但 scheduled() 从不执行），
+# 所以由 GitHub Actions 从外部按点开 Worker 的 /run —— Actions 出口能正常访问 workers.dev。
+# 口令走请求头，不进 URL，避免出现在 curl 报错和 Actions 日志里。
+
+on:
+  schedule:
+    - cron: '17 1,7,13,19 * * *'
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: '只报告和校验，不投递/不发布'
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: scout-run
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger stronghold-scout worker
+        env:
+          SCOUT_KEY: ${{ secrets.SCOUT_TOKEN }}
+          DRY: ${{ github.event.inputs.dry == 'true' && '&dry=1' || '' }}
+        run: |
+          set -euo pipefail
+          url="https://stronghold-scout.jingjiangze.workers.dev/run?ts=$(date -u +%s)${DRY}"
+          code=$(curl -sS -o resp.json -w '%{http_code}' \
+            --max-time 780 --retry 2 --retry-delay 30 \
+            -H "x-scout-key: ${SCOUT_KEY}" -H 'accept: application/json' "$url") || code=000
+          echo "http=$code"
+          if [ "$code" != "200" ]; then
+            echo '响应不是 200，前 600 字节：'
+            head -c 600 resp.json || true
+            exit 1
+          fi
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync("resp.json","utf8"));
+            const sub = r.submitted || [];
+            const lines = [
+              `- 扫描时间：${r.startedAt}（${((r.durationMs||0)/1000).toFixed(0)}s）`,
+              `- 发现候选：${r.discovered ?? "?"} | 验活：${r.verified ?? "?"} | 投递：${sub.length}`,
+              `- 已在清单：${r.alreadyListed ?? 0} | 排队跳过：${r.skippedQueued ?? 0} | 延后：${r.deferred ?? 0}`,
+              `- 配置：githubToken=${r.configured?.githubToken} biliCookie=${r.configured?.biliCookie} autoPublish=${!!r.configured?.autoPublish}`,
+            ];
+            if (r.fatal) lines.push(`- **致命错误**：${String(r.fatal).slice(0,300)}`);
+            for (const s of sub) lines.push(`  - ${s.url} → ${s.mode || "queued"}`);
+            if (sub.length === 0) lines.push('  - （本轮没有新服务器上线）');
+            if ((r.errors || []).length) lines.push(`- 异常：${r.errors.join(' | ').slice(0,300)}`);
+            require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+            console.log(lines.join("\n"));
+          '

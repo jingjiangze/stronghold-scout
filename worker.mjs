@@ -41,7 +41,10 @@ async function scan(env, dryRun) {
     out = { report: { startedAt: state.lastRun || null, fatal: String(e && e.stack || e).slice(0, 500), submitted: [], rejected: [], errors: ['fatal'] }, state };
   }
   const { report } = out;
-  report.configured = { githubToken: !!env.GITHUB_TOKEN, biliCookie: !!env.BILI_COOKIE, videos: DEFAULTS.videos.length };
+  report.configured = {
+    githubToken: !!env.GITHUB_TOKEN, biliCookie: !!env.BILI_COOKIE, videos: DEFAULTS.videos.length,
+    autoPublish: String(env.AUTO_PUBLISH || '') === '1' && !!(env.SP_SIGN_KEY && env.PUBLISH_KEY),
+  };
   await persist(env, out.state, report);
   return report;
 }
