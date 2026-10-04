@@ -76,6 +76,29 @@ export default {
         return new Response(JSON.stringify(probe, null, 2), { headers: { 'content-type': 'application/json' } });
       } catch (e) { return new Response(JSON.stringify({ error: String((e && e.stack) || e) }), { status: 500, headers: { 'content-type': 'application/json' } }); }
     }
+    if (url.pathname === '/ingest' && request.method === 'POST') {
+      // 采集在 GitHub Actions 跑（B 站只拉黑 CF 的 IP 段），签名仍只在这里：
+      // Actions 侧一个私钥都不放，口令换来的只是「投递候选」。
+      if (!env.SP_SIGN_KEY || !env.PUBLISH_KEY) return new Response(JSON.stringify({ ok: false, error: '缺 SP_SIGN_KEY/PUBLISH_KEY' }), { status: 500, headers: { 'content-type': 'application/json' } });
+      const body = await request.json().catch(() => ({}));
+      const list = Array.isArray(body.servers) ? body.servers.slice(0, 10) : [];
+      const p = createPublisher({ keys: { signKey: env.SP_SIGN_KEY, pubKey: env.SP_PUB_KEY }, adminKey: env.PUBLISH_KEY, log: (...a) => console.log(...a) });
+      const results = [];
+      for (const e of list) { try { results.push({ url: e.url, ...(await p.deliver(e)) }); } catch (err) { results.push({ url: e.url, ok: false, error: String((err && err.message) || err).slice(0, 120) }); } }
+      return new Response(JSON.stringify({ ok: true, results }, null, 2), { headers: { 'content-type': 'application/json' } });
+    }
+    if (url.pathname === '/ledger') {
+      // 台账托管在这里：Actions 侧不落私有状态，采集器读写 R2 的 scout/state.json 即可。
+      if (request.method === 'POST') {
+        const body = await request.text();
+        if (body.length > 900000) return new Response(JSON.stringify({ ok: false, error: 'state 太大' }), { status: 413, headers: { 'content-type': 'application/json' } });
+        try { JSON.parse(body); } catch { return new Response(JSON.stringify({ ok: false, error: 'state 不是合法 JSON' }), { status: 400, headers: { 'content-type': 'application/json' } }); }
+        await env.SCOUT.put(STATE_KEY, body, { httpMetadata: { contentType: 'application/json' } });
+        return new Response(JSON.stringify({ ok: true, bytes: body.length }), { headers: { 'content-type': 'application/json' } });
+      }
+      const s = await env.SCOUT.get(STATE_KEY);
+      return new Response(s ? s.body : '{}', { headers: { 'content-type': 'application/json' } });
+    }
     if (url.pathname === '/state') {
       const body = await env.SCOUT.get(STATE_KEY);
       return new Response(body ? body.body : '{}', { headers: { 'content-type': 'application/json' } });

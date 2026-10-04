@@ -4,3 +4,4 @@
 scout-state.json
 *.log
 node_modules/
+scout-report.json

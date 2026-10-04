@@ -28,6 +28,7 @@ export const DEFAULTS = {
   searchQueries: ['卫戍协议 网页版', '卫戍协议 联机 服务器'],
   autoSubmit: false,          // 默认只报告；确认维护端修好审核队列后再开
   maxSubmitsPerRun: 5,
+  commentPages: 12,          // 有 cookie 时每轮翻到第几页（B 站按时间序，新服都集中在最前 12 页）
   maxCandidates: 40,
   fetchTimeoutMs: 6000,
   refailCooldownMs: 3 * 864e5,
@@ -42,7 +43,7 @@ const HEALTH_FIELDS = ['uptimeSec', 'sockets', 'sessions', 'rooms', 'matches', '
    真正的判据仍是 /healthz 指纹。 */
 const SKIP_HOST = [/\.github\.io$/i, /\.pages\.dev$/i, /\.vercel\.app$/i, /\.netlify\.(app|site)$/i,
                    /\.gitlab\.io$/i, /^raw\.githubusercontent\.com$/i, /^github\.com$/i, /^gitee\.com$/i,
-                   /^bilibili\.com$/i, /^b23\.tv$/i, /^comment\.bilibili\.com$/i, /^api\.bilibili\.com$/i,
+                   /\.bilibili\.com$/i, /^b23\.tv$/i, /(^|\.)163\.com$/i, /(^|\.)music\.com$/i,
                    /(^|\.)pan\.baidu\.com$/i, /(^|\.)123pan\.cn$/i, /(^|\.)quark\.cn$/i, /(^|\.)docs\.qq\.com$/i,
                    /(^|\.)taptap\.cn$/i, /(^|\.)nga\.cn$/i, /(^|\.)nodejs\.org$/i, /(^|\.)npmmirror\.com$/i,
                    /(^|\.)shields\.io$/i, /(^|\.)example\.com$/i, /(^|\.)hypergryph\.com$/i,
@@ -246,7 +247,7 @@ async function fromBiliComments(ctx) {
   const headers = { referer: 'https://www.bilibili.com/', ...(cookie ? { cookie } : {}) };
   for (const v of ctx.cfg.videos) {
     for (const sort of [0, 2]) {
-      for (let pn = 1; pn <= (cookie ? 12 : 1); pn++) {
+      for (let pn = 1; pn <= (cookie ? cfg.commentPages : 1); pn++) {
         const d = await getJson(ctx.fetch, `https://api.bilibili.com/x/v2/reply?type=1&oid=${v.aid}&sort=${sort}&pn=${pn}&ps=20`, headers);
         const reps = d && d.data && d.data.replies;
         if (!Array.isArray(reps)) break;
@@ -388,6 +389,38 @@ export async function biliProbe(fetchImpl, cookie) {
   return { at: new Date().toISOString(), hasCookie: !!cookie, rows: out };
 }
 
+/* B 站「公开位」渠道：不需要登录、也不吃数据中心 IP 风控的四个位置。
+   实测（10-04 本机基线）：未登录时 /x/v2/reply 只回 3 条主楼，但 **UP 置顶评论
+   `data.upper.top` 照常返回**，`/web-interface/view`（简介）与 `/archive/related`
+   （相关视频）也都不要登录。作者把版本说明和地址写在置顶/简介里，正是新服出现的地方。 */
+async function fromBiliPublic(ctx) {
+  const found = new Map();
+  const headers = biliHeaders('', true);
+  for (const v of ctx.cfg.videos) {
+    const bag = [];
+    const rp = await getJson(ctx.fetch, `https://api.bilibili.com/x/v2/reply?type=1&oid=${v.aid}&sort=2&pn=1&ps=20`, headers);
+    const upper = rp?.data?.upper?.top;
+    if (upper && upper.content) bag.push(String(upper.content.message || ''));
+    for (const s of (upper && upper.replies) || []) bag.push(String((s.content && s.content.message) || ''));
+    if (upper && upper.rpid) {
+      const sub = await getJson(ctx.fetch, `https://api.bilibili.com/x/v2/reply/reply?type=1&oid=${v.aid}&root=${upper.rpid}&pn=1&ps=20`, headers);
+      for (const s of (sub && sub.data && sub.data.replies) || []) bag.push(String((s.content && s.content.message) || ''));
+    }
+    const view = await getJson(ctx.fetch, `https://api.bilibili.com/x/web-interface/view?bvid=${v.bvid}`, headers);
+    if (view && view.data) bag.push(String(view.data.desc || '') + ' ' + String(view.data.title || ''));
+    const rel = await getJson(ctx.fetch, `https://api.bilibili.com/x/web-interface/archive/related?bvid=${v.bvid}`, headers);
+    for (const it of ((rel && rel.data) || []).slice(0, ctx.cfg.relatedVideos)) {
+      bag.push(`${String(it.title || '')} ${String(it.desc || it.description || '')}`);
+    }
+    for (const t of bag) {
+      const urls = new Set();
+      linksIn(t, urls);
+      for (const u of urls) found.set(u, 'B站公开位（置顶/简介/相关）');
+    }
+  }
+  return found;
+}
+
 /* ---- 主流程 ---- */
 
 export async function runScout(options = {}) {
@@ -409,7 +442,7 @@ export async function runScout(options = {}) {
   if (!live.size) report.errors.push('线上清单读取失败，本轮不提交以免重复入队');
 
   const src = { cfg, fetch: fetchImpl, secrets, state };
-  const pools = [await fromGithub(src), await fromDanmaku(src), await fromBiliComments(src)];
+  const pools = [await fromGithub(src), await fromDanmaku(src), await fromBiliComments(src), await fromBiliPublic(src)];
   if (state.bili !== false) { try { pools.push(await fromBiliSearch(src)); } catch (e) { report.errors.push('B 站搜索渠道失败 ' + String(e).slice(0, 40)); } }
   const candidates = new Map();
   for (const pool of pools) for (const [raw, source] of pool) {

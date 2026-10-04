@@ -1,8 +1,11 @@
 name: scout-schedule
 
-# CF 原生 cron 在这个账户上不触发（schedules 列得出来但 scheduled() 从不执行），
-# 所以由 GitHub Actions 从外部按点开 Worker 的 /run —— Actions 出口能正常访问 workers.dev。
-# 口令走请求头，不进 URL，避免出现在 curl 报错和 Actions 日志里。
+# 分工：采集在 Actions 跑，签名留在 Cloudflare Worker。
+# 原因是 B 站按 IP 段拉黑 —— Worker 出口对评论接口一律 412（`/probe` 实测），
+# 而 Actions 出口 200/code 0。签名私钥一个都不放进 GitHub：Actions 只把候选交给
+# Worker 的 /ingest，由它完成 submit → approve → 补签 → PUT；台账托管在 Worker 的 R2（/ledger）。
+#
+# CF 原生 cron 在这个账户上列得出来但从不触发，所以定时器只能从外部打点。
 
 on:
   schedule:
@@ -10,12 +13,12 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: '调哪个端点：run=扫一轮，probe=渠道探针'
+        description: 'crawl=云端采集并上线（定时就是这个）'
         type: choice
-        default: run
-        options: [run, probe, bili]
+        default: crawl
+        options: [crawl, run, probe, bili]
       dry:
-        description: '只报告和校验，不投递/不发布（仅 target=run 有效）'
+        description: '只发现和校验，不投递（仅 crawl/run 有效）'
         type: boolean
         default: false
 
@@ -26,62 +29,86 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  crawl:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'crawl')
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scout on Actions egress
+        env:
+          SCOUT_TOKEN: ${{ secrets.SCOUT_TOKEN }}
+          BILI_COOKIE: ${{ secrets.BILI_COOKIE }}
+          DRY: ${{ github.event.inputs.dry == 'true' && '1' || '' }}
+        run: |
+          set -euo pipefail
+          node --version
+          node run-actions.mjs
+      - name: Summarize
+        if: always()
+        run: |
+          [ -f scout-report.json ] || exit 0
+          cat > sum.js <<'JS'
+          const fs = require('fs');
+          const r = JSON.parse(fs.readFileSync('scout-report.json', 'utf8'));
+          const sub = r.submitted || [];
+          const c = r.configured || {};
+          const L = [
+            `- 采集：${r.startedAt} → ${r.finishedAt}（${((r.durationMs || 0) / 1000).toFixed(0)}s）出口=GitHub Actions，投递=${r.deliverMode}`,
+            `- 候选 ${r.discovered ?? '?'} | 验活 ${r.verified ?? '?'} | 上线/投递 ${sub.length}`,
+            `- 已在清单 ${r.alreadyListed ?? 0} | 队列去重 ${r.skippedQueued ?? 0} | 延后 ${r.deferred ?? 0} | 截断 ${r.truncated ? '是' : '否'}`,
+            `- 台账：seen ${r.stateSize && r.stateSize.seen} | submitted ${r.stateSize && r.stateSize.submitted} | 候选池 ${r.candidates ?? '?'}`,
+          ];
+          if (r.fatal) L.push(`- **致命错误**：${String(r.fatal).slice(0, 300)}`);
+          for (const s of sub) L.push(`  - ${s.url} → ${s.mode || 'queued'}${s.detail && s.detail.sha256 ? ' sha256 ' + String(s.detail.sha256).slice(0, 12) : ''}${s.dryRun ? '（dry）' : ''}`);
+          if (!sub.length) L.push('  - （本轮没有新服务器上线）');
+          if ((r.errors || []).length) L.push(`- 异常：${String(r.errors.join(' | ')).slice(0, 400)}`);
+          const rej = (r.rejected || []).map((x) => { try { return new URL(x.origin).host; } catch { return String(x.origin).slice(0, 26); } });
+          if (rej.length) L.push(`- 未通过 ${rej.length} 个：${rej.join(', ').slice(0, 300)}`);
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, L.join('\n') + '\n');
+          console.log(L.join('\n'));
+          JS
+          node sum.js
+
+  # 手工兜底：让 Worker 自己跑一轮（评论渠道在它那个出口是废的，只当备用）
   sweep:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'run'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      EP: ${{ github.event.inputs.target || 'run' }}
     steps:
-      - name: Call stronghold-scout worker
+      - name: Call worker /run
         env:
           SCOUT_KEY: ${{ secrets.SCOUT_TOKEN }}
           DRY: ${{ github.event.inputs.dry == 'true' && '&dry=1' || '' }}
         run: |
           set -euo pipefail
-          url="https://stronghold-scout.yuehuibu5561.workers.dev/${EP}?ts=$(date -u +%s)${DRY}"
-          code=$(curl -sS -o resp.json -w '%{http_code}' \
-            --max-time 780 --retry 2 --retry-delay 30 \
+          url="https://stronghold-scout.yuehuibu5561.workers.dev/run?ts=$(date -u +%s)${DRY}"
+          code=$(curl -sS -o resp.json -w '%{http_code}' --max-time 780 --retry 2 --retry-delay 30 \
             -H "x-scout-key: ${SCOUT_KEY}" -H 'accept: application/json' "$url") || code=000
           echo "http=$code"
-          if [ "$code" != "200" ]; then
-            echo '响应不是 200，前 600 字节：'
-            head -c 600 resp.json || true
-            exit 1
-          fi
-          cat > summary.js <<'JS'
-          const fs = require('fs');
-          const r = JSON.parse(fs.readFileSync('resp.json', 'utf8'));
-          const L = [];
-          if (process.env.EP === 'probe') {
-            L.push(`- 探针时间：${r.at} | 带 cookie：${r.hasCookie}`);
-            L.push('| 入口 | HTTP | code | 主楼数 | acount | 耗时 | 命中链接 / 置顶 |');
-            L.push('| --- | --- | --- | --- | --- | --- | --- |');
-            for (const x of r.rows || []) {
-              L.push(`| ${x.name} | ${x.status ?? '-'} | ${x.code ?? (x.error || '')} | ${x.replies ?? '-'} | ${x.acount ?? '-'} | ${x.ms ?? '-'}ms | ${(x.links || []).slice(0, 2).join(' ')}${x.upper ? ' 置顶:' + x.upper.slice(0, 40) : ''} |`);
-            }
-          } else {
-            const sub = r.submitted || [];
-            const c = r.configured || {};
-            L.push(`- 扫描：${r.startedAt} → ${r.finishedAt}（${((r.durationMs || 0) / 1000).toFixed(0)}s）`);
-            L.push(`- 候选 ${r.discovered ?? '?'} | 验活 ${r.verified ?? '?'} | 本轮投递 ${sub.length}`);
-            L.push(`- 已在清单 ${r.alreadyListed ?? 0} | 队列去重 ${r.skippedQueued ?? 0} | 延后 ${r.deferred ?? 0} | 截断 ${r.truncated ? '是' : '否'}`);
-            L.push(`- 渠道：githubToken=${c.githubToken} biliCookie=${c.biliCookie} autoPublish=${c.autoPublish} 视频数=${c.videos}`);
-            L.push(`- 台账：候选 ${r.candidates ?? '?'} 条 | seen ${r.stateSize && r.stateSize.seen} | submitted ${r.stateSize && r.stateSize.submitted}`);
-            if (r.fatal) L.push(`- **致命错误**：${String(r.fatal).slice(0, 300)}`);
-            for (const s of sub) L.push(`  - ${s.url} → ${s.mode || 'queued'}${s.detail && s.detail.sha256 ? ' sha256 ' + String(s.detail.sha256).slice(0, 12) : ''}`);
-            if (!sub.length) L.push('  - （本轮没有新服务器上线）');
-            if ((r.errors || []).length) L.push(`- 异常：${String(r.errors.join(' | ')).slice(0, 300)}`);
-            const hosts = (r.rejected || []).map((x) => { try { return new URL(x.origin).host; } catch { return String(x.origin).slice(0, 30); } });
-            if (hosts.length) L.push(`- 未通过 ${hosts.length} 个：${hosts.join(', ').slice(0, 300)}`);
-          }
-          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, L.join('\n') + '\n');
-          console.log(L.join('\n'));
-          JS
-          node summary.js
-          if [ -n "${DRY:-}" ]; then echo '::warning::dry run，未投递'; fi
+          [ "$code" = "200" ] || { head -c 600 resp.json || true; exit 1; }
+          head -c 1200 resp.json
 
-  # B 站风控看的是出口 IP：Cloudflare 全线 412，GitHub Actions 的出口是不是也被拉黑决定
-  # 「云端读评论区」到底能不能落地。只在手工选 bili 时跑，不进定时。
+  probe:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'probe'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Channel probe
+        env: { SCOUT_KEY: ${{ secrets.SCOUT_TOKEN }} }
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o probe.json -w '%{http_code}' --max-time 300 -H "x-scout-key: ${SCOUT_KEY}" -H 'accept: application/json' \
+            "https://stronghold-scout.yuehuibu5561.workers.dev/probe?ts=$(date -u +%s)") || code=000
+          echo "http=$code"
+          node -e '
+            const r = JSON.parse(require("fs").readFileSync("probe.json","utf8"));
+            const md = [`- 探针 ${r.at} | cookie ${r.hasCookie}`, "", "| 入口 | HTTP | code | 主楼 | acount | ms |", "| --- | --- | --- | --- | --- | --- |"];
+            for (const x of r.rows || []) md.push(`| ${x.name} | ${x.status ?? "-"} | ${x.code ?? (x.error || "-")} | ${x.replies ?? "-"} | ${x.acount ?? "-"} | ${x.ms ?? "-"} |`);
+            require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join("\n") + "\n");
+            console.log(md.join("\n"));
+          '
+
   bili-egress:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'bili'
     runs-on: ubuntu-latest
@@ -92,7 +119,7 @@ jobs:
           CK: ${{ secrets.BILI_COOKIE }}
         run: |
           set -uo pipefail
-          cat > p.js <<'JS'
+          cat > p.mjs <<'JS'
           import fs from 'node:fs';
           const UA = {
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -117,14 +144,13 @@ jobs:
           const q = (pn) => `https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&sort=2&pn=${pn}&ps=20`;
           await hit('未登录 p1', q(1), false);
           await hit('带 cookie p1', q(1), true);
-          await hit('带 cookie p30', q(30), true);
+          await hit('带 cookie p12', q(12), true);
+          await hit('带 cookie 热度序 p1', `https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&sort=0&pn=1&ps=20`, true);
           await hit('view 详情', 'https://api.bilibili.com/x/web-interface/view?bvid=BV1QoaU6gEF2', false);
-          await hit('弹幕 XML', 'https://comment.bilibili.com/42396680690.xml', false);
-          await hit('搜索 WBI 前的 nav', 'https://api.bilibili.com/x/web-interface/nav', false);
           const md = ['| 入口 | HTTP | code | 主楼数 | acount |', '| --- | --- | --- | --- | --- |'];
           for (const x of rows) md.push(`| ${x.name} | ${x.http} | ${x.code ?? '-'} | ${x.replies} | ${x.acount ?? '-'} |`);
-          md.push('', `- cookie 是否注入：${ck ? 'yes len ' + ck.length : 'NO（仓库没配 BILI_COOKIE secret）'}`);
+          md.push('', `- cookie 注入：${ck ? 'yes ' + ck.length + 'B' : 'NO'}`);
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
           console.log(JSON.stringify(rows, null, 1));
           JS
-          node p.js
+          node p.mjs
