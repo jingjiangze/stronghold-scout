@@ -28,9 +28,12 @@ export const DEFAULTS = {
   searchQueries: ['卫戍协议 网页版', '卫戍协议 联机 服务器'],
   autoSubmit: false,          // 默认只报告；确认维护端修好审核队列后再开
   maxSubmitsPerRun: 5,
-  commentPages: 12,          // 见 run-actions.mjs：可用 COMMENT_PAGES 覆盖
+  commentPages: 12,          // 有 cookie 时按时间序翻到第几页（可用 COMMENT_PAGES 覆盖）
   forkPages: 2,
-  readmeScanMax: 15,          // 有 cookie 时每轮翻到第几页（B 站按时间序，新服都集中在最前 12 页）
+  readmeScanMax: 15,
+  githubIntervalMin: 180,   // fork 枚举/README/仓库搜索的节流间隔（分钟）
+  hotPages: 3,              // 热度序评论浅翻；新服基本只出现在按时间序的前几页
+  candidateRetryMin: 120,   // 老候选（出现满一天）的复探间隔，分钟
   maxCandidates: 40,
   fetchTimeoutMs: 6000,
   refailCooldownMs: 3 * 864e5,
@@ -189,8 +192,12 @@ async function fromGithub(ctx) {
   };
   const urls = (blob, source) => { const set = new Set(); linksIn(blob, set); for (const u of set) if (!found.has(u)) found.set(u, source); };
 
+  // fork 枚举 + README + 仓库搜索是最贵的一坨（200 个 fork 列表 + 几十个 README 原文）。
+  // 30 分钟一轮不必每轮都做，按 githubIntervalMin 节流；上游 Issue 是增量扫的，每轮都跑。
+  const gapMs = (ctx.cfg.githubIntervalMin || 0) * 60000;
+  const heavyDue = !(gapMs && ctx.state.githubAt && Date.now() - ctx.state.githubAt < gapMs);
   const forks = [];
-  for (let page = 1; page <= ctx.cfg.forkPages; page++) {
+  for (let page = 1; heavyDue && page <= ctx.cfg.forkPages; page++) {
     const list = await gh(`repos/${ctx.cfg.upstream}/forks?per_page=100&sort=newest&page=${page}`);
     if (!Array.isArray(list) || !list.length) break;
     forks.push(...list);
@@ -210,7 +217,7 @@ async function fromGithub(ctx) {
     const body = await text(`repos/${f.full_name}/readme?ref=${encodeURIComponent(f.default_branch || 'master')}`);
     if (body) { urls(body, `README ${f.full_name}`); ctx.state.readme[f.full_name] = stamp; scanned++; }
   }
-  for (const q of ctx.cfg.repoQueries) {
+  for (const q of (heavyDue ? ctx.cfg.repoQueries : [])) {
     const d = await gh(`search/repositories?q=${encodeURIComponent(q)}&per_page=30&sort=updated`);
     for (const it of (Array.isArray(d) ? d : [])) if (it.homepage) found.set(it.homepage, `GitHub 搜索 ${it.full_name}`);
   }
@@ -224,6 +231,7 @@ async function fromGithub(ctx) {
     for (const c of (Array.isArray(comments) ? comments : [])) urls(c.body || '', `Issue #${i.number} 评论`);
     ctx.state.issues[i.number] = i.updated_at;
   }
+  if (heavyDue) ctx.state.githubAt = Date.now();
   return found;
 }
 
@@ -246,21 +254,38 @@ async function fromDanmaku(ctx) {
 async function fromBiliComments(ctx) {
   const found = new Map();
   const cookie = ctx.secrets.biliCookie;
-  const headers = { referer: 'https://www.bilibili.com/', ...(cookie ? { cookie } : {}) };
+  const headers = biliHeaders(cookie, true);
+  // 时间水位：上一轮已经翻到过的评论时间戳。按时间序翻页时，一旦某页出现比水位更早的
+  // 评论就说明已经翻过重复区，直接停 —— 30 分钟一轮靠这个把每轮请求数压到个位数。
+  const watermark = Number(ctx.state.biliWatermark) || 0;
+  let newest = watermark;
+  const stamp = (c) => {
+    const raw = Number(c && (c.created || c.create_time * 1000)) || 0;
+    return raw > 1e12 ? raw : raw * 1000;
+  };
   for (const v of ctx.cfg.videos) {
-    for (const sort of [0, 2]) {
-      for (let pn = 1; pn <= (cookie ? ctx.cfg.commentPages : 1); pn++) {
+    for (const sort of [2, 0]) {
+      const depth = sort === 2 ? (cookie ? ctx.cfg.commentPages : 1) : (cookie ? ctx.cfg.hotPages : 1);
+      let repeat = false;
+      for (let pn = 1; pn <= depth && !repeat; pn++) {
         const d = await getJson(ctx.fetch, `https://api.bilibili.com/x/v2/reply?type=1&oid=${v.aid}&sort=${sort}&pn=${pn}&ps=20`, headers);
         const reps = d && d.data && d.data.replies;
         if (!Array.isArray(reps)) break;
         for (const c of reps) {
-          const urls = new Set(); linksIn(c?.content?.message, urls);
+          const at = stamp(c);
+          if (at > newest) newest = at;
+          if (sort === 2 && watermark && at && at <= watermark) repeat = true;
+          const urls = new Set();
+          linksIn(c?.content?.message, urls);
+          // 楼中楼里也常有「我这边还有个服」的补充，同一次请求白送
+          for (const sub of (c.replies || [])) linksIn(sub?.content?.message, urls);
           for (const u of urls) found.set(u, `评论区 ${(c?.member?.uname || '').slice(0, 12)}`);
         }
         if (!reps.length || (d.data.cursor && d.data.cursor.is_end)) break;
       }
     }
   }
+  if (newest > watermark) ctx.state.biliWatermark = newest;
   return found;
 }
 
@@ -468,6 +493,14 @@ export async function runScout(options = {}) {
     if (live.has(origin) || liveHosts.has(hostKey)) { state.seen[origin] = { ...(state.seen[origin] || {}), lastSeenLive: now, at: now }; continue; }
     const C = state.candidates = state.candidates || {};
     if (!C[origin]) C[origin] = { firstSeen: now, source, probes: 0 };
+    // 30 分钟一轮时，把已经死掉两周的地址每轮重探纯属烧 runner 时间：
+    // 出现超过一天的老候选降到 candidateRetryMin 的频率；一天内的新地址照旧每轮探。
+    const aged = now - (C[origin].firstSeen || now) >= 24 * 3600e3;
+    const retryMs = (cfg.candidateRetryMin || 0) * 60000;
+    if (aged && retryMs && C[origin].lastProbe && now - C[origin].lastProbe < retryMs) {
+      report.throttled = (report.throttled || 0) + 1;
+      continue;
+    }
     let verdict = null, resolved = null;
     try { resolved = await resolveServer(fetchImpl, origin, cfg.fetchTimeoutMs, cfg.probePaths, cfg.clientMounts); }
     catch (e) { resolved = null; }
