@@ -31,7 +31,7 @@ jobs:
           DRY: ${{ github.event.inputs.dry == 'true' && '&dry=1' || '' }}
         run: |
           set -euo pipefail
-          url="https://stronghold-scout.jingjiangze.workers.dev/run?ts=$(date -u +%s)${DRY}"
+          url="https://stronghold-scout.yuehuibu5561.workers.dev/run?ts=$(date -u +%s)${DRY}"
           code=$(curl -sS -o resp.json -w '%{http_code}' \
             --max-time 780 --retry 2 --retry-delay 30 \
             -H "x-scout-key: ${SCOUT_KEY}" -H 'accept: application/json' "$url") || code=000
