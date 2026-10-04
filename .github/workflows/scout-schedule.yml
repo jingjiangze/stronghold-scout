@@ -125,6 +125,8 @@ jobs:
             `- 已在清单 ${r.alreadyListed ?? 0} | 队列去重 ${r.skippedQueued ?? 0} | 延后 ${r.deferred ?? 0} | 截断 ${r.truncated ? '是' : '否'}`,
             `- 台账：seen ${r.stateSize && r.stateSize.seen} | submitted ${r.stateSize && r.stateSize.submitted} | 候选池 ${r.candidates ?? '?'}`,
           ];
+          for (const smp of r.watch || []) L.push(`- 监听 ${smp.host}：${smp.ok ? "在线" : "掉线（" + (smp.err || "?") + "）"} | app ${smp.app || "-"} | 人 ${smp.humans ?? "-"} | 房 ${smp.rooms ?? "-"} | 连续运行 ${smp.uptimeSec != null ? (smp.uptimeSec / 3600).toFixed(1) + " 小时" : "-"} | 历史 ${smp.samples} 点`);
+          for (const e of r.watchEvents || []) L.push(`  - ⚠ **监听事件 ${e.type}** @${e.host}：${JSON.stringify(e).slice(0, 150)}`);
           if (r.fatal) L.push(`- **致命错误**：${String(r.fatal).slice(0, 300)}`);
           for (const s of sub) L.push(`  - ${s.url} → ${s.mode || 'queued'}${s.detail && s.detail.sha256 ? ' sha256 ' + String(s.detail.sha256).slice(0, 12) : ''}${s.dryRun ? '（dry）' : ''}`);
           if (!sub.length) L.push('  - （本轮没有新服务器上线）');

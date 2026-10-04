@@ -13,7 +13,7 @@
      DRY=1          只发现不投递
    ========================================================================================== */
 import fs from 'node:fs';
-import { runScout, biliHeaders } from './scout.mjs';
+import { runScout, biliHeaders, watchServers, DEFAULTS } from './scout.mjs';
 
 const WORKER = (process.env.SCOUT_WORKER || 'https://stronghold-scout.yuehuibu5561.workers.dev').replace(/\/+$/, '');
 const KEY = process.env.SCOUT_TOKEN || '';
@@ -52,6 +52,7 @@ function ingestDeliver() {
   };
 }
 
+const baseFetch = (u, i) => fetch(u, i);
 const state = await loadLedger();
 
 /* 守门：30 分钟一轮里绝大多数轮次其实什么都没变，但一次 GitHub Actions 作业要 3.5 分钟
@@ -116,6 +117,10 @@ if (gate.due) {
 })).report;
 } else {
   report = { skipped: true, reason: gate.why, discovered: 0, verified: 0, submitted: [], rejected: [], errors: [] };
+  // 跳过的是重活，不是监听：历史留空洞就看不出「掉了几小时」，所以照样打个点。
+  try {
+    await watchServers({ cfg: DEFAULTS, state, fetch: (u, i) => baseFetch(u, { ...(i || {}), signal: AbortSignal.timeout(12000) }) }, report);
+  } catch (e) { console.log('[actions] 监听采样失败：', String(e.message).slice(0, 50)); }
 }
 report.durationMs = Date.now() - t0;
 report.dryRun = DRY;

@@ -25,6 +25,7 @@ export const DEFAULTS = {
      每轮复探，哪天它开出合法的 /healthz 就会被自动收进清单。 */
   seeds: [{ url: 'https://ark-proto.stardust.matce.cn', note: 'B站 10-04 Stardust_减，登录门改版' },
           { url: 'https://sp.nekotc.cn', note: '妮蔻（已在清单，复探用于容量观察）' }],
+  watch: ['https://game.rainya.me'],   // 监听名单：每小时一次采样，见 watchServers
   searchQueries: ['卫戍协议 网页版', '卫戍协议 联机 服务器'],
   autoSubmit: false,          // 默认只报告；确认维护端修好审核队列后再开
   maxSubmitsPerRun: 5,
@@ -276,6 +277,44 @@ async function relatedVideos(ctx) {
   }
   if (out.length) ctx.state.related = { at: Date.now(), list: out };
   return ctx.state.related.list;
+}
+
+/* 监听：对指定站点做时间序列采样 —— 活没活、几人在、版本/构建有没有变、有没有悄悄重启。
+   样本跟着台账一起存进 Worker 的 R2，直读 https://weishucdn.jiangjiangze.icu/scout/state.json
+   就能看到 watch[host] 的历史数组和最近 60 条 watchEvents。 */
+const WATCH_SAMPLES = 300;
+export async function watchServers(ctx, report) {
+  const events = [];
+  ctx.state.watch = ctx.state.watch || {};
+  for (const target of ctx.cfg.watch || []) {
+    const origin = normalizeCandidate(typeof target === 'string' ? target : target.url);
+    if (!origin) continue;
+    const key = new URL(origin).host;
+    const hist = ctx.state.watch[key] || [];
+    const prev = hist.slice(-1)[0] || null;
+    const paths = (typeof target === 'object' && target.probe) ? [target.probe] : (ctx.cfg.probePaths || ['/healthz']);
+    let s = { at: Date.now(), ok: false, err: 'unreachable' };
+    for (const p of paths) {
+      const v = await probeHealth(ctx.fetch, origin, ctx.cfg.fetchTimeoutMs, [p]);
+      if (v.ok) { s = { at: s.at, ok: true, probe: p, app: v.app || null, build: v.build || null, humans: v.humans ?? null, rooms: v.rooms ?? null, uptimeSec: v.uptimeSec ?? null }; break; }
+      s.err = v.error;
+    }
+    if (!s.ok) s = { at: s.at, ok: false, err: String(s.err || 'unreachable').slice(0, 44) };
+    hist.push(s);
+    if (hist.length > WATCH_SAMPLES) hist.splice(0, hist.length - WATCH_SAMPLES);
+    ctx.state.watch[key] = hist;
+
+    if (s.ok && (!prev || !prev.ok)) events.push({ host: key, type: 'up', at: s.at, app: s.app, build: s.build });
+    if (!s.ok && prev && prev.ok) events.push({ host: key, type: 'down', at: s.at, reason: s.err });
+    if (s.ok && prev && prev.ok) {
+      if (prev.app !== s.app || prev.build !== s.build) events.push({ host: key, type: 'version', at: s.at, from: prev.app + '/' + (prev.build || '-'), to: s.app + '/' + (s.build || '-') });
+      if (Number.isFinite(prev.uptimeSec) && Number.isFinite(s.uptimeSec) && s.uptimeSec < prev.uptimeSec) events.push({ host: key, type: 'restart', at: s.at, uptimeSec: s.uptimeSec });
+    }
+    (report.watch = report.watch || []).push({ host: key, ok: s.ok, app: s.app || null, humans: s.humans ?? null, rooms: s.rooms ?? null, uptimeSec: s.uptimeSec ?? null, samples: hist.length, err: s.ok ? null : s.err });
+  }
+  if (events.length) ctx.state.watchEvents = (ctx.state.watchEvents || []).concat(events).slice(-60);
+  report.watchEvents = events;
+  return events;
 }
 
 async function fromBiliComments(ctx) {
@@ -589,6 +628,7 @@ export async function runScout(options = {}) {
     else { state.seen[origin].submitError = String(body.error || '').slice(0, 60); report.errors.push(`${origin}: ${body.error}`); }
   }
 
+  await watchServers(src, report);
   for (const k of Object.keys(state.seen)) if (now - (state.seen[k].at || 0) > 30 * 864e5) delete state.seen[k];
   for (const k of Object.keys(state.submitted)) if (now - (state.submitted[k].at || 0) > 30 * 864e5) delete state.submitted[k];
   /* 候选台账留 90 天：现在没开服的地址，以后可能就成了服 */
