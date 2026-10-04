@@ -18,6 +18,7 @@ export const DEFAULTS = {
   submitUrl: 'https://dl.jiangjiangze.icu/api/servers/submit',
   reviewUrl: 'https://dl.jiangjiangze.icu/api/servers/review',
   probePaths: ['/healthz', '/api/status', '/health'],   // raiya 这类挂在子路径/改名健康检查的服要靠这个才收得进来
+  clientMounts: ['/play', '/game', '/app', '/covenant', '/'],  // 客户端本体的常见挂载点
   videos: [{ aid: '117371003995662', cid: '42396680690', note: '主视频' }],
   repoQueries: ['卫戍协议', 'stronghold protocol arknights'],
   /* 人工观察名单：现在还没过指纹，但已经在跑别的形态（登录门、状态站…）。
@@ -64,12 +65,13 @@ export function isPublicHttpUrl(raw) {
 }
 
 function originOf(u) { return `${u.protocol}//${u.host}`; }
+/** ?room=RWJW 这类深链也是服务器：去掉 ? 与 # 之后的部分，但保留 path（子路径挂载是真的）。 */
 function normalizeCandidate(raw) {
   const u = isPublicHttpUrl(raw);
   if (!u) return null;
   if (SKIP_HOST.some(re => re.test(u.hostname))) return null;
-  const o = originOf(u);
-  return o;
+  const path = u.pathname.replace(/\/+$/, '');
+  return originOf(u) + path;
 }
 const cleanId = s => String(s || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
 const cleanNote = s => String(s || '').trim().slice(0, 48);
@@ -126,6 +128,44 @@ function linksIn(text, into) {
 }
 
 const unesc = s => String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+
+/* 判断一个 URL 是不是游戏客户端本体（而不是状态页/落地页）：
+   上游 index.html 里同时有 viewport-fit=cover、/vendor/ 资源、STRONGHOLD PROTOCOL 标题。 */
+const CLIENT_MARKERS = [/viewport-fit=cover/i, /\/vendor\//i, /STRONGHOLD PROTOCOL/i];
+export async function looksLikeClient(fetchImpl, url, timeoutMs) {
+  try {
+    const res = await fetchImpl(url, { headers: { 'user-agent': 'stronghold-scout/1', accept: 'text/html' } });
+    if (!res.ok) return false;
+    const html = (await res.text()).slice(0, 20000);
+    return CLIENT_MARKERS.filter(re => re.test(html)).length >= 2;
+  } catch { return false; }
+}
+
+/**
+ * 把一个候选地址解析成「可入清单的条目」：
+ *   健康检查一律在站点根上找（/healthz、/api/status、/health 任选其一命中）；
+ *   客户端本体可能挂在 /play 之类子路径（raiya 的根是状态页，/healthz 还被 nginx 403），
+ *   所以再找挂载点，找不到就退回站点根。
+ * 返回 { probePath, clientUrl } 或 null。
+ */
+export async function resolveServer(fetchImpl, candidate, timeoutMs, probePaths, clientMounts) {
+  const u = isPublicHttpUrl(candidate); if (!u) return null;
+  const origin = originOf(u);
+  let probePath = null;
+  for (const p of probePaths) {
+    const v = await probeHealth(fetchImpl, origin, timeoutMs, [p]);
+    if (v.ok) { probePath = p; break; }
+  }
+  if (!probePath) return null;
+  for (const mount of (clientMounts || ['/'])) {
+    const url = origin + (mount === '/' ? '' : mount);
+    if (url === candidate || mount === '/') {
+      if (await looksLikeClient(fetchImpl, url || origin + '/', timeoutMs)) return { probePath, clientUrl: url, origin };
+      if (mount !== '/') continue;
+    } else if (await looksLikeClient(fetchImpl, url, timeoutMs)) return { probePath, clientUrl: url, origin };
+  }
+  return { probePath, clientUrl: u.pathname.replace(/\/+$/, '') ? origin + u.pathname.replace(/\/+$/, '') : origin, origin };
+}
 
 /* ---- 渠道 ---- */
 
@@ -268,7 +308,10 @@ export async function runScout(options = {}) {
   const report = { autoSubmit: !!cfg.autoSubmit, startedAt: new Date(now).toISOString(), discovered: 0, verified: 0, submitted: [], rejected: [], errors: [] };
 
   const liveDoc = await getJson(fetchImpl, cfg.liveList, { accept: 'application/json' });
-  const live = new Set(((liveDoc && liveDoc.servers) || []).map(s => s.url));
+  const liveList = (liveDoc && liveDoc.servers) || [];
+  const live = new Set(liveList.map(s => s.url));
+  /* 同一站点挂不同 path 只算一台：按 host 去重，避免把 raiya 的 /play 与 /?room=… 当成两家 */
+  const liveHosts = new Set(liveList.map(s => { try { return new URL(s.url).host; } catch { return ''; } }).filter(Boolean));
   if (!live.size) report.errors.push('线上清单读取失败，本轮不提交以免重复入队');
 
   const src = { cfg, fetch: fetchImpl, secrets, state };
@@ -292,11 +335,14 @@ export async function runScout(options = {}) {
   let probed = 0;
   for (const [origin, source] of candidates) {
     if (probed++ >= cfg.maxCandidates || Date.now() - now > (cfg.budgetMs || 90e3)) { report.truncated = true; break; }
-    if (live.has(origin)) { state.seen[origin] = { ...(state.seen[origin] || {}), lastSeenLive: now, at: now }; continue; }
+    let hostKey = ''; try { hostKey = new URL(origin).host; } catch { /* ignore */ }
+    if (live.has(origin) || liveHosts.has(hostKey)) { state.seen[origin] = { ...(state.seen[origin] || {}), lastSeenLive: now, at: now }; continue; }
     const C = state.candidates = state.candidates || {};
     if (!C[origin]) C[origin] = { firstSeen: now, source, probes: 0 };
-    let verdict; try { verdict = await probeHealth(fetchImpl, origin, cfg.fetchTimeoutMs, cfg.probePaths); }
-    catch (e) { verdict = { ok: false, error: 'probe 异常 ' + String(e && e.name || e).slice(0, 30) }; }
+    let verdict = null, resolved = null;
+    try { resolved = await resolveServer(fetchImpl, origin, cfg.fetchTimeoutMs, cfg.probePaths, cfg.clientMounts); }
+    catch (e) { resolved = null; }
+    verdict = resolved ? { ok: true, probe: resolved.probePath, variant: 'resolved' } : { ok: false, error: '无合法健康检查' };
     C[origin].lastProbe = now; C[origin].probes++;
     const prev = state.seen[origin] || {};
     if (!verdict.ok) {
@@ -311,7 +357,9 @@ export async function runScout(options = {}) {
     if (state.submitted[origin] && now - state.submitted[origin].at < 7 * 864e5) { report.skippedQueued = (report.skippedQueued || 0) + 1; continue; }
     if (report.submitted.length >= cfg.maxSubmitsPerRun) { report.deferred = (report.deferred || 0) + 1; continue; }
     const id = cleanId(new URL(origin).hostname.split('.')[0]) || `srv-${Object.keys(state.seen).length}`;
-    const entry = { id, name: `${new URL(origin).hostname}（待核）`, url: origin, probe: verdict.probe || '/healthz',
+    const entryUrl = resolved.clientUrl || origin;
+    if (live.has(entryUrl) || liveHosts.has(new URL(entryUrl).host)) { report.alreadyListed = (report.alreadyListed || 0) + 1; continue; }
+    const entry = { id, name: `${new URL(origin).hostname}（待核）`, url: entryUrl, probe: resolved.probePath,
                     enabled: true, note: cleanNote(`自动发现 · ${source}`) };
     if (options.dryRun) { report.submitted.push({ ...entry, dryRun: true, verdict }); continue; }
     if (options.deliver) {
