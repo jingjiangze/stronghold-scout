@@ -95,7 +95,8 @@ jobs:
     timeout-minutes: 6
     steps:
       - name: Channel probe
-        env: { SCOUT_KEY: ${{ secrets.SCOUT_TOKEN }} }
+        env:
+          SCOUT_KEY: ${{ secrets.SCOUT_TOKEN }}
         run: |
           set -euo pipefail
           code=$(curl -sS -o probe.json -w '%{http_code}' --max-time 300 -H "x-scout-key: ${SCOUT_KEY}" -H 'accept: application/json' \
