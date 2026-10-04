@@ -32,6 +32,8 @@ export const DEFAULTS = {
   forkPages: 2,
   readmeScanMax: 15,
   githubIntervalMin: 180,   // fork 枚举/README/仓库搜索的节流间隔（分钟）
+  expandRelated: true,     // 把二创/教程视频的评论区也纳进来
+  maxRelatedVideos: 6,      // 每轮最多额外带几个相关视频
   hotPages: 3,              // 热度序评论浅翻；新服基本只出现在按时间序的前几页
   candidateEagerHours: 6,   // 新地址这几小时内每轮都探（刚开服往往反复重启）
   candidateRetryMin: 120,   // 老候选（出现满一天）的复探间隔，分钟
@@ -252,19 +254,40 @@ async function fromDanmaku(ctx) {
   return found;
 }
 
+/* 二创/教程视频的评论区是主视频之外的另一批分享源；一次 API 就能拿到列表，
+   结果缓进台账，按 maxRelatedVideos 限流，避免每小时一轮时把请求数翻几倍。 */
+async function relatedVideos(ctx) {
+  if (!ctx.cfg.expandRelated) return [];
+  ctx.state.related = ctx.state.related || { at: 0, list: [] };
+  if (Date.now() - ctx.state.related.at < 6 * 3600e3 && ctx.state.related.list.length) return ctx.state.related.list;
+  const out = [];
+  const headers = biliHeaders(ctx.secrets.biliCookie, true);
+  for (const v of ctx.cfg.videos) {
+    if (!v.bvid) continue;
+    const rel = await getJson(ctx.fetch, 'https://api.bilibili.com/x/web-interface/archive/related?bvid=' + v.bvid, headers);
+    for (const it of ((rel && rel.data) || [])) {
+      if (out.length >= ctx.cfg.maxRelatedVideos) break;
+      out.push({ aid: String(it.aid), cid: String(it.cid), bvid: it.bvid, note: '相关·' + String(it.title).slice(0, 14) });
+    }
+  }
+  if (out.length) ctx.state.related = { at: Date.now(), list: out };
+  return ctx.state.related.list;
+}
+
 async function fromBiliComments(ctx) {
   const found = new Map();
   const cookie = ctx.secrets.biliCookie;
   const headers = biliHeaders(cookie, true);
   // 时间水位：上一轮已经翻到过的评论时间戳。按时间序翻页时，一旦某页出现比水位更早的
   // 评论就说明已经翻过重复区，直接停 —— 30 分钟一轮靠这个把每轮请求数压到个位数。
+  const videos = ctx.cfg.videos.concat(await relatedVideos(ctx));
   const watermark = Number(ctx.state.biliWatermark) || 0;
   let newest = watermark;
   const stamp = (c) => {
     const raw = Number(c && (c.created || c.create_time * 1000)) || 0;
     return raw > 1e12 ? raw : raw * 1000;
   };
-  for (const v of ctx.cfg.videos) {
+  for (const v of videos) {
     for (const sort of [2, 0]) {
       const depth = sort === 2 ? (cookie ? ctx.cfg.commentPages : 1) : (cookie ? ctx.cfg.hotPages : 1);
       let repeat = false;
@@ -424,7 +447,7 @@ export async function biliProbe(fetchImpl, cookie) {
 async function fromBiliPublic(ctx) {
   const found = new Map();
   const headers = biliHeaders('', true);
-  for (const v of ctx.cfg.videos) {
+  for (const v of ctx.cfg.videos.concat(await relatedVideos(ctx))) {
     const bag = [];
     const rp = await getJson(ctx.fetch, `https://api.bilibili.com/x/v2/reply?type=1&oid=${v.aid}&sort=2&pn=1&ps=20`, headers);
     const upper = rp?.data?.upper?.top;
