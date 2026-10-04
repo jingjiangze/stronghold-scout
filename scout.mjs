@@ -28,7 +28,9 @@ export const DEFAULTS = {
   searchQueries: ['卫戍协议 网页版', '卫戍协议 联机 服务器'],
   autoSubmit: false,          // 默认只报告；确认维护端修好审核队列后再开
   maxSubmitsPerRun: 5,
-  commentPages: 12,          // 有 cookie 时每轮翻到第几页（B 站按时间序，新服都集中在最前 12 页）
+  commentPages: 12,          // 见 run-actions.mjs：可用 COMMENT_PAGES 覆盖
+  forkPages: 2,
+  readmeScanMax: 15,          // 有 cookie 时每轮翻到第几页（B 站按时间序，新服都集中在最前 12 页）
   maxCandidates: 40,
   fetchTimeoutMs: 6000,
   refailCooldownMs: 3 * 864e5,
@@ -188,7 +190,7 @@ async function fromGithub(ctx) {
   const urls = (blob, source) => { const set = new Set(); linksIn(blob, set); for (const u of set) if (!found.has(u)) found.set(u, source); };
 
   const forks = [];
-  for (let page = 1; page <= 2; page++) {
+  for (let page = 1; page <= ctx.cfg.forkPages; page++) {
     const list = await gh(`repos/${ctx.cfg.upstream}/forks?per_page=100&sort=newest&page=${page}`);
     if (!Array.isArray(list) || !list.length) break;
     forks.push(...list);
@@ -202,7 +204,7 @@ async function fromGithub(ctx) {
   ctx.state.readme = ctx.state.readme || {};
   let scanned = 0;
   for (const f of forks) {
-    if (scanned >= 15) break;
+    if (scanned >= ctx.cfg.readmeScanMax) break;
     const stamp = `${f.pushed_at}|${f.default_branch}`;
     if (ctx.state.readme[f.full_name] === stamp) continue;
     const body = await text(`repos/${f.full_name}/readme?ref=${encodeURIComponent(f.default_branch || 'master')}`);

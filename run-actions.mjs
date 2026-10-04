@@ -56,7 +56,12 @@ const state = await loadLedger();
 const t0 = Date.now();
 const { report } = await runScout({
   state, dryRun: DRY,
-  config: { autoSubmit: true, commentPages: Number(process.env.COMMENT_PAGES || 12) },
+  config: {
+    autoSubmit: true,
+    commentPages: Number(process.env.COMMENT_PAGES || 12),
+    forkPages: Number(process.env.FORK_PAGES || 2),
+    readmeScanMax: Number(process.env.README_SCAN_MAX || 15),
+  },
   deliver: DRY ? undefined : ingestDeliver(),
   secrets: { biliCookie: process.env.BILI_COOKIE || '', githubToken: process.env.GITHUB_TOKEN || '' },
   log: (...a) => console.log('[actions]', ...a),

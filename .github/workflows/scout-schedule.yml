@@ -21,6 +21,14 @@ on:
         description: '只发现和校验，不投递（仅 crawl/run 有效）'
         type: boolean
         default: false
+      pages:
+        description: '评论区翻到第几页（留空=12；加深有触发 B 站风控的风险）'
+        type: string
+        default: ''
+      forks:
+        description: 'fork README 最多扫多少个（留空=15）'
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -42,6 +50,11 @@ jobs:
           SCOUT_TOKEN: ${{ secrets.SCOUT_TOKEN }}
           BILI_COOKIE: ${{ secrets.BILI_COOKIE }}
           DRY: ${{ github.event.inputs.dry == 'true' && '1' || '' }}
+          COMMENT_PAGES: ${{ github.event.inputs.pages }}
+          README_SCAN_MAX: ${{ github.event.inputs.forks }}
+          # Actions 出口是共享 IP，匿名 GitHub API 只有 60 次/小时，扫 fork 会被限流；
+          # 用作业自带的受限 token 顶到 1000 次/小时，不引入任何新凭据。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           node --version
