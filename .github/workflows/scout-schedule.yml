@@ -93,6 +93,7 @@ jobs:
         run: |
           set -uo pipefail
           cat > p.js <<'JS'
+          import fs from 'node:fs';
           const UA = {
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             referer: 'https://www.bilibili.com/', origin: 'https://www.bilibili.com',
@@ -123,7 +124,7 @@ jobs:
           const md = ['| 入口 | HTTP | code | 主楼数 | acount |', '| --- | --- | --- | --- | --- |'];
           for (const x of rows) md.push(`| ${x.name} | ${x.http} | ${x.code ?? '-'} | ${x.replies} | ${x.acount ?? '-'} |`);
           md.push('', `- cookie 是否注入：${ck ? 'yes len ' + ck.length : 'NO（仓库没配 BILI_COOKIE secret）'}`);
-          require('fs').appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
           console.log(JSON.stringify(rows, null, 1));
           JS
           node p.js
