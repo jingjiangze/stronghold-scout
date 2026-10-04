@@ -9,8 +9,10 @@ name: scout-schedule
 
 on:
   schedule:
-    # 每 30 分钟一轮；错开整点/半点（GitHub 的调度在整点最挤，实测会延迟几分钟）
-    - cron: '7,37 * * * *'
+    # 每小时一次，:13 分触发（GitHub 整点调度最拥堵，会延迟几分钟）。
+    # 频率不再靠拍脑袋定：作业自己按月度分钟预算记账（默认 1400 / 免费 2000），
+    # 用满就自动降级成空转跳过，避免超额后 GitHub 静默停掉 schedule。
+    - cron: '13 * * * *'
   workflow_dispatch:
     inputs:
       target:
@@ -65,7 +67,10 @@ jobs:
             const count = Number(cj && cj.data && (cj.data.count ?? cj.data.total));
             const s = await (await fetch(W + '/ledger', { headers: { 'x-scout-key': K }, signal: AbortSignal.timeout(15000) })).json();
             const prev = Number(s.biliCount) || 0;
-            if (!Number.isFinite(count) || count === 0) { why = '评论数不可用'; }
+            const bud = Number(process.env.ACTIONS_MINUTE_BUDGET || 1400);
+            const m = s.meter && s.meter.month === new Date().toISOString().slice(0, 7) ? s.meter : { minutes: 0 };
+            if (m.minutes >= bud) { due = false; why = `本月分钟预算已用完（${Math.round(m.minutes)}/${bud}）`; }
+            else if (!Number.isFinite(count) || count === 0) { why = '评论数不可用'; }
             else if (!prev || count !== prev) { due = true; why = `评论数 ${prev} → ${count}`; }
             else if (!s.githubAt || now - s.githubAt >= 180 * 60000) { due = true; why = 'fork 扫描到期'; }
             else {

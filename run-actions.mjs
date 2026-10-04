@@ -59,8 +59,15 @@ const state = await loadLedger();
    静默停掉。所以先用 1 个请求问评论总数有没有动，再看法克/复探窗口到没到期；
    都没动静就直接收工（一轮 ~40 秒），只在真有可能新东西时才做完整采集。
    FORCE_CRAWL=1 可绕过。 */
+/* 私密仓免费只有 2000 分钟/月，超了 GitHub 是「静默停掉 schedule」——正是今天查了一天的
+   那类失效。所以自己记账：预算用满就只留最便宜的空转，绝不冒停摆的险。 */
+const BUDGET_MIN = Number(process.env.ACTIONS_MINUTE_BUDGET || 1400);
+const monthKey = (d = new Date()) => d.toISOString().slice(0, 7);
+
 async function deltaDue(state) {
   const now = Date.now();
+  state.meter = state.meter && state.meter.month === monthKey() ? state.meter : { month: monthKey(), minutes: 0 };
+  if (state.meter.minutes >= BUDGET_MIN) return { due: false, why: `本月 Actions 分钟预算已用完（${state.meter.minutes.toFixed(0)}/${BUDGET_MIN}）` };
   const aid = (process.env.BILI_OID || '117371003995662');
   let count = null;
   try {
@@ -113,6 +120,11 @@ if (gate.due) {
 report.durationMs = Date.now() - t0;
 report.dryRun = DRY;
 report.deliverMode = 'worker /ingest';
+// 计一次账：脚本墙钟 + 开机/checkout 的固定开销（约 40 秒）
+report.meteredMinutes = Math.round(((report.durationMs || 0) / 60000 + 0.7) * 100) / 100;
+state.meter.minutes = Math.round((state.meter.minutes + report.meteredMinutes) * 100) / 100;
+state.meter.month = monthKey();
+console.log(`[actions] 本月已计 ${state.meter.minutes} / ${BUDGET_MIN} 分钟`);
 await saveLedger(state);
 fs.writeFileSync('scout-report.json', JSON.stringify(report, null, 2) + '\n');
 console.log(JSON.stringify(report, null, 2));
