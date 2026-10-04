@@ -33,6 +33,7 @@ export const DEFAULTS = {
   readmeScanMax: 15,
   githubIntervalMin: 180,   // fork 枚举/README/仓库搜索的节流间隔（分钟）
   hotPages: 3,              // 热度序评论浅翻；新服基本只出现在按时间序的前几页
+  candidateEagerHours: 6,   // 新地址这几小时内每轮都探（刚开服往往反复重启）
   candidateRetryMin: 120,   // 老候选（出现满一天）的复探间隔，分钟
   maxCandidates: 40,
   fetchTimeoutMs: 6000,
@@ -495,7 +496,7 @@ export async function runScout(options = {}) {
     if (!C[origin]) C[origin] = { firstSeen: now, source, probes: 0 };
     // 30 分钟一轮时，把已经死掉两周的地址每轮重探纯属烧 runner 时间：
     // 出现超过一天的老候选降到 candidateRetryMin 的频率；一天内的新地址照旧每轮探。
-    const aged = now - (C[origin].firstSeen || now) >= 24 * 3600e3;
+    const aged = now - (C[origin].firstSeen || now) >= (cfg.candidateEagerHours || 6) * 3600e3;
     const retryMs = (cfg.candidateRetryMin || 0) * 60000;
     if (aged && retryMs && C[origin].lastProbe && now - C[origin].lastProbe < retryMs) {
       report.throttled = (report.throttled || 0) + 1;

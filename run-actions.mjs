@@ -13,7 +13,7 @@
      DRY=1          只发现不投递
    ========================================================================================== */
 import fs from 'node:fs';
-import { runScout } from './scout.mjs';
+import { runScout, biliHeaders } from './scout.mjs';
 
 const WORKER = (process.env.SCOUT_WORKER || 'https://stronghold-scout.yuehuibu5561.workers.dev').replace(/\/+$/, '');
 const KEY = process.env.SCOUT_TOKEN || '';
@@ -53,8 +53,46 @@ function ingestDeliver() {
 }
 
 const state = await loadLedger();
+
+/* 守门：30 分钟一轮里绝大多数轮次其实什么都没变，但一次 GitHub Actions 作业要 3.5 分钟
+   （开机 + checkout + 扫描），48 轮/天 ≈ 5000 分钟/月，私密仓免费只有 2000，月中就会被
+   静默停掉。所以先用 1 个请求问评论总数有没有动，再看法克/复探窗口到没到期；
+   都没动静就直接收工（一轮 ~40 秒），只在真有可能新东西时才做完整采集。
+   FORCE_CRAWL=1 可绕过。 */
+async function deltaDue(state) {
+  if (process.env.FORCE_CRAWL === '1') return { due: true, why: 'FORCE_CRAWL' };
+  const now = Date.now();
+  const aid = (process.env.BILI_OID || '117371003995662');
+  let count = null;
+  try {
+    const r = await fetch(`https://api.bilibili.com/x/v2/reply/count?type=1&oid=${aid}`, {
+      headers: { ...biliHeaders(process.env.BILI_COOKIE || '', true), cookie: process.env.BILI_COOKIE || '' },
+      signal: AbortSignal.timeout(12000),
+    });
+    const j = await r.json();
+    count = j && j.data && (j.data.count ?? j.data.total);
+  } catch (e) { console.log('[actions] 评论数取不到，按有声静处理：', String(e.message).slice(0, 40)); }
+  if (count == null) return { due: true, why: '评论数不可用' };
+  const prev = Number(state.biliCount) || 0;
+  if (!prev || Number(count) !== prev) { state.biliCount = Number(count); return { due: true, why: `评论数 ${prev} → ${count}` }; }
+  state.biliCount = Number(count);
+  const ghGap = (process.env.GITHUB_INTERVAL_MIN || 180) * 60000;
+  if (!state.githubAt || now - state.githubAt >= ghGap) return { due: true, why: 'fork 扫描到期' };
+  const retry = (process.env.CANDIDATE_RETRY_MIN || 120) * 60000;
+  const C = state.candidates || {};
+  const dueC = Object.values(C).filter((c) => (now - (c.firstSeen || now) < (Number(process.env.CANDIDATE_EAGER_HOURS) || 6) * 3600e3) || !c.lastProbe || now - c.lastProbe >= retry).length;
+  if (dueC > 0) return { due: true, why: `${dueC} 个候选到复探时间` };
+  return { due: false, why: `评论数未变（${count}）且各窗口未到` };
+}
+
+const gate = await deltaDue(state);
+console.log(`[actions] 守门：${gate.due ? '真跑' : '跳过'} —— ${gate.why}`);
+fs.writeFileSync('scout-gate.json', JSON.stringify(gate, null, 1));
+
 const t0 = Date.now();
-const { report } = await runScout({
+let report;
+if (gate.due) {
+  report = (await runScout({
   state, dryRun: DRY,
   config: {
     autoSubmit: true,
@@ -65,7 +103,10 @@ const { report } = await runScout({
   deliver: DRY ? undefined : ingestDeliver(),
   secrets: { biliCookie: process.env.BILI_COOKIE || '', githubToken: process.env.GITHUB_TOKEN || '' },
   log: (...a) => console.log('[actions]', ...a),
-});
+})).report;
+} else {
+  report = { skipped: true, reason: gate.why, discovered: 0, verified: 0, submitted: [], rejected: [], errors: [] };
+}
 report.durationMs = Date.now() - t0;
 report.dryRun = DRY;
 report.deliverMode = 'worker /ingest';

@@ -45,14 +45,57 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 14
     steps:
+      # 守门放在 checkout 之前：跳过的一轮也要付开机+初始化时间，把判断挪到最前面，
+      # 没动静时整作业 20 多秒就结束，48 轮/天才不会把私密仓的 2000 分钟/月烧穿。
+      - name: Gate
+        id: gate
+        env:
+          SCOUT_KEY: ${{ secrets.SCOUT_TOKEN }}
+          CK: ${{ secrets.BILI_COOKIE }}
+        run: |
+          cat > gate.mjs <<'JS'
+          const W = 'https://stronghold-scout.yuehuibu5561.workers.dev';
+          const K = process.env.SCOUT_KEY, CK = process.env.CK || '';
+          const UA = { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            referer: 'https://www.bilibili.com/', accept: 'application/json', ...(CK ? { cookie: CK } : {}) };
+          const now = Date.now();
+          let due = true, why = '兜底：默认跑';
+          try {
+            const cj = await (await fetch('https://api.bilibili.com/x/v2/reply/count?type=1&oid=117371003995662', { headers: UA, signal: AbortSignal.timeout(12000) })).json();
+            const count = Number(cj && cj.data && (cj.data.count ?? cj.data.total));
+            const s = await (await fetch(W + '/ledger', { headers: { 'x-scout-key': K }, signal: AbortSignal.timeout(15000) })).json();
+            const prev = Number(s.biliCount) || 0;
+            if (!Number.isFinite(count) || count === 0) { why = '评论数不可用'; }
+            else if (!prev || count !== prev) { due = true; why = `评论数 ${prev} → ${count}`; }
+            else if (!s.githubAt || now - s.githubAt >= 180 * 60000) { due = true; why = 'fork 扫描到期'; }
+            else {
+              const C = s.candidates || {};
+              const n = Object.values(C).filter((c) => (now - (c.firstSeen || now) < 6 * 3600e3) || !c.lastProbe || now - c.lastProbe >= 120 * 60000).length;
+              if (n > 0) { due = true; why = `${n} 个候选到复探时间`; }
+              else { due = false; why = `评论数未变（${count}），各窗口均未到期`; }
+            }
+          } catch (e) { why = '守门异常，照常跑：' + String(e.message || e).slice(0, 60); }
+          console.log(`gate due=${due} :: ${why}`);
+          const fs = await import('node:fs');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `due=${due}\nwhy=${why.replace(/\n/g, ' ')}\n`);
+          JS
+          node gate.mjs
+      - name: Report the skip
+        if: steps.gate.outputs.due == 'false'
+        run: |
+          echo "- 守门跳过：${{ steps.gate.outputs.why }}（本轮没发采集请求）" >> "$GITHUB_STEP_SUMMARY"
+          echo "本轮跳过：${{ steps.gate.outputs.why }}"
       - uses: actions/checkout@v4
+        if: steps.gate.outputs.due == 'true'
       - name: Run scout on Actions egress
+        if: steps.gate.outputs.due == 'true'
         env:
           SCOUT_TOKEN: ${{ secrets.SCOUT_TOKEN }}
           BILI_COOKIE: ${{ secrets.BILI_COOKIE }}
           DRY: ${{ github.event.inputs.dry == 'true' && '1' || '' }}
           COMMENT_PAGES: ${{ github.event.inputs.pages }}
           README_SCAN_MAX: ${{ github.event.inputs.forks }}
+          FORCE_CRAWL: '1'
           # Actions 出口是共享 IP，匿名 GitHub API 只有 60 次/小时，扫 fork 会被限流；
           # 用作业自带的受限 token 顶到 1000 次/小时，不引入任何新凭据。
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -70,8 +113,10 @@ jobs:
           const sub = r.submitted || [];
           const c = r.configured || {};
           const L = [
-            `- 采集：${r.startedAt} → ${r.finishedAt}（${((r.durationMs || 0) / 1000).toFixed(0)}s）出口=GitHub Actions，投递=${r.deliverMode}`,
-            `- 候选 ${r.discovered ?? '?'} | 验活 ${r.verified ?? '?'} | 上线/投递 ${sub.length}`,
+            r.skipped
+              ? `- 守门跳过：${r.reason}（本轮没打采集请求，${((r.durationMs || 0) / 1000).toFixed(0)}s）`
+              : `- 采集：${r.startedAt} → ${r.finishedAt}（${((r.durationMs || 0) / 1000).toFixed(0)}s）出口=GitHub Actions，投递=${r.deliverMode}`,
+            `- 候选 ${r.discovered ?? '?'} | 验活 ${r.verified ?? '?'} | 上线/投递 ${sub.length}${r.throttled ? ' | 复探节流 ' + r.throttled : ''}`,
             `- 已在清单 ${r.alreadyListed ?? 0} | 队列去重 ${r.skippedQueued ?? 0} | 延后 ${r.deferred ?? 0} | 截断 ${r.truncated ? '是' : '否'}`,
             `- 台账：seen ${r.stateSize && r.stateSize.seen} | submitted ${r.stateSize && r.stateSize.submitted} | 候选池 ${r.candidates ?? '?'}`,
           ];
