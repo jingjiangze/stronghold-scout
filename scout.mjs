@@ -555,12 +555,12 @@ export async function runScout(options = {}) {
   // 只看 host 会把同一域名下不同子路径的另一台实例误判成重复；完全不看 host 又会让深链变成新条目。
   const splitUrl = (u) => { try { const x = new URL(u); const p = x.pathname.replace(/\/+$/, ''); return { host: x.host, path: p || '/' }; } catch { return null; } };
   const listed = liveList.map((u) => splitUrl(u && u.url)).filter(Boolean);
+  const hostOf = (u) => { try { return new URL(u).host; } catch { return ''; } };
+  const liveHosts = new Set(listed.map((y) => y.host));
+  // 与站点 listCollision 同一口径：**一台 host 只留一条**。清单里已有同 host 且不属于
+  // 「清单存裸根 + 候选带更深路径」这种可升级组合的，一律不再报第二行。
   const alreadyListed = (u) => { const x = splitUrl(u); if (!x) return false;
-    // 只认两个方向：路径完全相同，或候选本身就是裸根（清单里那条更深的地址已经覆盖它）。
-    // 原来还认"清单是裸根就覆盖带路径的候选"，那等于把路径永久锁死 ——
-    // game.cranepaul.dpdns.org 的 /play.html 就是这么一直进不去的。带路径的候选放行，
-    // 由下面的 clientVerified 门槛把关，站点 submit 负责把入口升级成带路径的地址。
-    return listed.some((y) => y.host === x.host && (x.path === y.path || x.path === '/')); };
+    return listed.some((y) => y.host === x.host && !(y.path === '/' && x.path !== '/')); };
   const listedOnlyRoot = (u) => { const x = splitUrl(u); if (!x || x.path === '/') return false;
     return listed.some((y) => y.host === x.host && y.path === '/'); };
   if (!live.size) report.errors.push('线上清单读取失败，本轮不提交以免重复入队');
@@ -580,7 +580,7 @@ export async function runScout(options = {}) {
     let needle = '';
     try { needle = new URL(origin).hostname; } catch { needle = ''; }
     if (!needle || SKIP_HOST.some((re) => re.test(needle))) { delete state.candidates[origin]; continue; }
-    if (!candidates.has(origin) && !live.has(origin)) candidates.set(origin, c.source || '候选台账');
+    if (!candidates.has(origin) && !liveHosts.has(hostOf(origin))) candidates.set(origin, c.source || '候选台账');
   }
   for (const seed of cfg.seeds || []) {
     const o = normalizeCandidate(seed.url);
