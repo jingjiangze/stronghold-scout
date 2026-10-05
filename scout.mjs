@@ -18,7 +18,7 @@ export const DEFAULTS = {
   submitUrl: 'https://dl.jiangjiangze.icu/api/servers/submit',
   reviewUrl: 'https://dl.jiangjiangze.icu/api/servers/review',
   probePaths: ['/healthz', '/api/status', '/health'],   // raiya 这类挂在子路径/改名健康检查的服要靠这个才收得进来
-  clientMounts: ['/play', '/game', '/app', '/covenant', '/'],  // 客户端本体的常见挂载点
+  clientMounts: ['/play', '/play.html', '/game', '/app', '/covenant', '/'],  // 客户端本体的常见挂载点
   videos: [{ aid: '117371003995662', cid: '42396680690', bvid: 'BV1QoaU6gEF2', note: '主视频' }],
   repoQueries: ['卫戍协议', 'stronghold protocol arknights'],
   /* 人工观察名单：现在还没过指纹，但已经在跑别的形态（登录门、状态站…）。
@@ -171,14 +171,16 @@ export async function resolveServer(fetchImpl, candidate, timeoutMs, probePaths,
     if (v.ok) { probePath = p; break; }
   }
   if (!probePath) return null;
-  for (const mount of (clientMounts || ['/'])) {
+  // 候选自带的非根路径先当成入口：站长/玩家往往就是按 `…/play.html` 发的地址，原样保留才点得开
+  // （game.cranepaul.dpdns.org 就是这样被剥成裸主机名收录进来的）。
+  const ownPath = u.pathname.replace(/\/+$/, '');
+  const mounts = clientMounts || ['/'];
+  const tries = ownPath ? [ownPath, ...mounts.filter((m) => m !== ownPath)] : mounts;
+  for (const mount of tries) {
     const url = origin + (mount === '/' ? '' : mount);
-    if (url === candidate || mount === '/') {
-      if (await looksLikeClient(fetchImpl, url || origin + '/', timeoutMs)) return { probePath, clientUrl: url, origin };
-      if (mount !== '/') continue;
-    } else if (await looksLikeClient(fetchImpl, url, timeoutMs)) return { probePath, clientUrl: url, origin };
+    if (await looksLikeClient(fetchImpl, url || origin + '/', timeoutMs)) return { probePath, clientUrl: url, origin };
   }
-  return { probePath, clientUrl: u.pathname.replace(/\/+$/, '') ? origin + u.pathname.replace(/\/+$/, '') : origin, origin };
+  return { probePath, clientUrl: ownPath ? origin + ownPath : origin, origin };
 }
 
 /* ---- 渠道 ---- */
