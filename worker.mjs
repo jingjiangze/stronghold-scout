@@ -64,6 +64,7 @@ export default {
         const p = createPublisher({ keys: { signKey: env.SP_SIGN_KEY, pubKey: env.SP_PUB_KEY }, adminKey: env.PUBLISH_KEY || 'none', fetch: (u, i) => fetch(u, { ...i, signal: (i && i.signal) || AbortSignal.timeout(15000) }) });
         const doc = await (await fetch(`https://weishucdn.jiangjiangze.icu/site/servers.json?cb=${Date.now()}`)).json();
         return new Response(JSON.stringify({ autoPublish: String(env.AUTO_PUBLISH || '') === '1', hasSignKey: !!env.SP_SIGN_KEY, hasPublishKey: !!env.PUBLISH_KEY,
+          hasGithubTickToken: !!env.GH_TICK_TOKEN,
           liveCount: doc.servers?.length, liveUpdated: doc.updated, crossVerify: p.verifyDoc(doc), canonicalSha: p.canonicalSha(doc) }, null, 2),
           { headers: { 'content-type': 'application/json' } });
       } catch (e) { return new Response(JSON.stringify({ error: String(e && e.stack || e) }), { status: 500, headers: { 'content-type': 'application/json' } }); }
@@ -75,6 +76,30 @@ export default {
         await env.SCOUT.put('scout/probe.json', JSON.stringify(probe, null, 1), { httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=30' } });
         return new Response(JSON.stringify(probe, null, 2), { headers: { 'content-type': 'application/json' } });
       } catch (e) { return new Response(JSON.stringify({ error: String((e && e.stack) || e) }), { status: 500, headers: { 'content-type': 'application/json' } }); }
+    }
+    if (url.pathname === '/tick') {
+      // 外部闹钟入口：盒子那边的定时任务只要这个 URL + 触发口令就能拉一轮 Actions 采集。
+      // 为什么绕 Worker 一手而不把仓库口令放盒子文件系统：dispatch 要的是能写 Actions 的 PAT，
+      // 它待在 Cloudflare secret 里是密封的、可单独删；盒子只拿触发口令（等价于"能启动一轮采集"）。
+      const J = (o, s = 200) => new Response(JSON.stringify(o, null, 2), { status: s, headers: { 'content-type': 'application/json' } });
+      if (!env.GH_TICK_TOKEN) return J({ ok: false, error: '未配置 GH_TICK_TOKEN（一把只对 jingjiangze/stronghold-scout 有 Actions: write 的 fine-grained PAT）' }, 503);
+      const allowed = ['crawl', 'run', 'probe', 'bili'];
+      const target = allowed.includes(url.searchParams.get('target')) ? url.searchParams.get('target') : 'crawl';
+      const num = (v) => String(v || '').replace(/\D/g, '').slice(0, 3);
+      const inputs = { target, dry: url.searchParams.get('dry') === '1',
+        pages: num(url.searchParams.get('pages')), forks: num(url.searchParams.get('forks')), tick_min: '' };
+      const res = await fetch('https://api.github.com/repos/jingjiangze/stronghold-scout/actions/workflows/scout-schedule.yml/dispatches', {
+        method: 'POST', signal: AbortSignal.timeout(20000),
+        headers: { authorization: 'Bearer ' + env.GH_TICK_TOKEN, accept: 'application/vnd.github+json',
+          'user-agent': 'stronghold-scout-tick', 'content-type': 'application/json' },
+        body: JSON.stringify({ ref: 'main', inputs }),
+      });
+      const rec = { ok: res.status === 204, http: res.status, at: new Date().toISOString(), target,
+        note: res.status === 204 ? '' : (await res.text().catch(() => '')).slice(0, 200) };
+      // 心跳落 R2：这样"盒子到底有没有在打点"是可查的，不用去翻机上日志
+      await env.SCOUT.put('scout/tick.json', JSON.stringify({ ...rec, lastOk: rec.ok ? rec.at : null }, null, 1),
+        { httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=30' } });
+      return J(rec, rec.ok ? 200 : 502);
     }
     if (url.pathname === '/ingest' && request.method === 'POST') {
       // 采集在 GitHub Actions 跑（B 站只拉黑 CF 的 IP 段），签名仍只在这里：
