@@ -98,13 +98,28 @@ export function createPublisher(options = {}) {
 
   /** 交给 runScout 的 deliver(entry, verdict)。 */
   async function deliver(entry) {
-    const sub = await json(fetchImpl(cfg.submitUrl, timed({ method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ servers: [entry] }) })));
+    // 投递一律出示管理口令：站点侧现在只认维护者通道的 direct_cn（见 dl-site submit.js）。
+    const post = (e) => json(fetchImpl(cfg.submitUrl, timed({
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json', 'x-admin-key': options.adminKey },
+      body: JSON.stringify({ servers: [e] }),
+    })));
+    let sub = await post(entry);
+    let attested = false;
+    // 我们自己的出口已经跑过 /healthz 指纹，站点边缘却报 403/超时/5xx —— 那是裸 IP 上架的
+    // 国内云在挡 Cloudflare，不是"不是卫戍服务器"。带 direct_cn 担保重投一次，否则这种服务器
+    // 永远进不了清单（10-05 一晚撞上两台：183.66.27.19:20522、115.29.215.81:3000）。
+    if (!sub.body.ok && sub.status === 400 && /403|超时|timeout|5\d\d/i.test(String(sub.body.error || ''))) {
+      const mark = `｜出口验活通过、边缘${sub.body.error}`;
+      sub = await post({ ...entry, direct_cn: true, note: `${entry.note || ''}${mark}`.trim().slice(0, 44) });
+      attested = true;
+    }
     if (!sub.body.ok) return /已在/.test(String(sub.body.error || '')) ? { ok: true, mode: 'already-listed' } : { ok: false, error: `submit(${sub.status}): ${sub.body.error}` };
     const rev = await json(fetchImpl(cfg.reviewUrl, timed({ method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json', 'x-admin-key': options.adminKey }, body: JSON.stringify({ id: sub.body.id, action: 'approve' }) })));
     if (!rev.body.ok) return { ok: false, error: `approve(${rev.status}): ${rev.body.error}` };
     try {
       const done = await resignAndPublish({ reason: entry.id, force: true });
-      return { ok: true, mode: 'published', detail: { ...done, added: entry.url } };
+      return { ok: true, mode: attested ? 'published(direct_cn 担保)' : 'published', detail: { ...done, added: entry.url } };
     } catch (e) { return { ok: false, error: e.message }; }
   }
 
