@@ -78,9 +78,10 @@ export default {
       } catch (e) { return new Response(JSON.stringify({ error: String((e && e.stack) || e) }), { status: 500, headers: { 'content-type': 'application/json' } }); }
     }
     if (url.pathname === '/tick') {
-      // 外部闹钟入口：盒子那边的定时任务只要这个 URL + 触发口令就能拉一轮 Actions 采集。
-      // 为什么绕 Worker 一手而不把仓库口令放盒子文件系统：dispatch 要的是能写 Actions 的 PAT，
-      // 它待在 Cloudflare secret 里是密封的、可单独删；盒子只拿触发口令（等价于"能启动一轮采集"）。
+      // 备用打点入口：盒子或本机只要 curl 这个 URL + 触发口令就能拉一轮 Actions 采集。
+      // 现在**故意没配 GH_TICK_TOKEN**（会明确回 503）—— 持续节拍已由独立闹钟仓
+      // jingjiangze/stronghold-tick 承担（口令以 GitHub secret 形式密封在那里，不落 CF 也不落盒子）。
+      // 这条路径留着当"闹钟仓哪天也哑了"的手动后手。
       const J = (o, s = 200) => new Response(JSON.stringify(o, null, 2), { status: s, headers: { 'content-type': 'application/json' } });
       if (!env.GH_TICK_TOKEN) return J({ ok: false, error: '未配置 GH_TICK_TOKEN（一把只对 jingjiangze/stronghold-scout 有 Actions: write 的 fine-grained PAT）' }, 503);
       const allowed = ['crawl', 'run', 'probe', 'bili'];
