@@ -10,8 +10,14 @@ const until = process.env.TICK_WAIT_MIN ? Number(process.env.TICK_WAIT_MIN) : 75
 const t0 = Date.now();
 console.log(`开始等 tick 仓的 schedule 轮（最多 ${until} 分钟），现在 ${new Date().toISOString()}`);
 while (Date.now() - t0 < until * 60000) {
-  const r = await get('https://api.github.com/repos/jingjiangze/stronghold-tick/actions/runs?event=schedule&per_page=1');
-  const run = (r.workflow_runs || [])[0];
+  // 本机到 api.github.com 会偶发 UND_ERR_CONNECT_TIMEOUT，轮询器不能一次网络抖动就退场
+  let run = null;
+  try {
+    const r = await get('https://api.github.com/repos/jingjiangze/stronghold-tick/actions/runs?event=schedule&per_page=1');
+    run = (r.workflow_runs || [])[0] || null;
+  } catch (e) {
+    console.log(`  查询失败（${String(e && e.cause && e.cause.code || e.message || e).slice(0, 40)}），继续等`);
+  }
   if (run && Date.parse(run.created_at) > t0 - 60000) {
     console.log(`命中：run ${run.id} ${run.created_at} → ${run.updated_at} ${run.status}/${run.conclusion}`);
     const jobs = await get(`https://api.github.com/repos/jingjiangze/stronghold-tick/actions/runs/${run.id}/jobs`);
