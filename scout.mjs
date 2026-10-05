@@ -178,9 +178,10 @@ export async function resolveServer(fetchImpl, candidate, timeoutMs, probePaths,
   const tries = ownPath ? [ownPath, ...mounts.filter((m) => m !== ownPath)] : mounts;
   for (const mount of tries) {
     const url = origin + (mount === '/' ? '' : mount);
-    if (await looksLikeClient(fetchImpl, url || origin + '/', timeoutMs)) return { probePath, clientUrl: url, origin };
+    if (await looksLikeClient(fetchImpl, url || origin + '/', timeoutMs)) return { probePath, clientUrl: url, origin, clientVerified: true };
   }
-  return { probePath, clientUrl: ownPath ? origin + ownPath : origin, origin };
+  // 没验到客户端页：只是把候选自带的路径原样留着，调用方要靠 clientVerified 分辨
+  return { probePath, clientUrl: ownPath ? origin + ownPath : origin, origin, clientVerified: false };
 }
 
 /* ---- 渠道 ---- */
@@ -555,7 +556,13 @@ export async function runScout(options = {}) {
   const splitUrl = (u) => { try { const x = new URL(u); const p = x.pathname.replace(/\/+$/, ''); return { host: x.host, path: p || '/' }; } catch { return null; } };
   const listed = liveList.map((u) => splitUrl(u && u.url)).filter(Boolean);
   const alreadyListed = (u) => { const x = splitUrl(u); if (!x) return false;
-    return listed.some((y) => y.host === x.host && (x.path === y.path || x.path === '/' || y.path === '/')); };
+    // 只认两个方向：路径完全相同，或候选本身就是裸根（清单里那条更深的地址已经覆盖它）。
+    // 原来还认"清单是裸根就覆盖带路径的候选"，那等于把路径永久锁死 ——
+    // game.cranepaul.dpdns.org 的 /play.html 就是这么一直进不去的。带路径的候选放行，
+    // 由下面的 clientVerified 门槛把关，站点 submit 负责把入口升级成带路径的地址。
+    return listed.some((y) => y.host === x.host && (x.path === y.path || x.path === '/')); };
+  const listedOnlyRoot = (u) => { const x = splitUrl(u); if (!x || x.path === '/') return false;
+    return listed.some((y) => y.host === x.host && y.path === '/'); };
   if (!live.size) report.errors.push('线上清单读取失败，本轮不提交以免重复入队');
 
   const src = { cfg, fetch: fetchImpl, secrets, state };
@@ -616,6 +623,12 @@ export async function runScout(options = {}) {
     const id = cleanId(new URL(origin).hostname.split('.')[0]) || `srv-${Object.keys(state.seen).length}`;
     const entryUrl = resolved.clientUrl || origin;
     if (alreadyListed(entryUrl)) { report.alreadyListed = (report.alreadyListed || 0) + 1; continue; }
+    if (listedOnlyRoot(entryUrl) && !resolved.clientVerified) {
+      // 清单里这条 host 存的是裸根，而候选的路径又没被确认是客户端页 —— 拿它去升级会把
+      // 玩家的链接改坏，宁可不改。
+      report.upgradeSkipped = (report.upgradeSkipped || 0) + 1;
+      continue;
+    }
     const entry = { id, name: `${new URL(origin).hostname}（待核）`, url: entryUrl, probe: resolved.probePath,
                     enabled: true, note: cleanNote(`自动发现 · ${source}`) };
     if (options.dryRun) { report.submitted.push({ ...entry, dryRun: true, verdict }); continue; }
