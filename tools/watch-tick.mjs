@@ -6,7 +6,7 @@ const TOK = fs.readFileSync(process.env.USERPROFILE + '/.gh_fine_token', 'utf8')
 const H = { authorization: 'Bearer ' + TOK, accept: 'application/vnd.github+json', 'user-agent': 'tick-watch' };
 const get = async (u) => (await fetch(u, { headers: H, signal: AbortSignal.timeout(40000) })).json();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const until = process.env.TICK_WAIT_MIN ? Number(process.env.TICK_WAIT_MIN) : 12;
+const until = process.env.TICK_WAIT_MIN ? Number(process.env.TICK_WAIT_MIN) : 75;   // 要跨过下一个 :07 槽位，12 分钟会过早下结论
 const t0 = Date.now();
 console.log(`开始等 tick 仓的 schedule 轮（最多 ${until} 分钟），现在 ${new Date().toISOString()}`);
 while (Date.now() - t0 < until * 60000) {
@@ -26,4 +26,4 @@ while (Date.now() - t0 < until * 60000) {
   }
   await sleep(45000);
 }
-console.log(`超时：${until} 分钟内 tick 仓没有 event=schedule 的新 run —— 说明这一格的 GitHub 定时也没打`);
+console.log(`超时：等了 ${until} 分钟仍没有 event=schedule 的新 run（这一格没打；注意先确认等待窗口真的跨过了 :07）`);
