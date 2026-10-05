@@ -162,7 +162,8 @@ jobs:
             accept: 'application/vnd.github+json', 'user-agent': 'scout-tick', 'content-type': 'application/json' };
           const REPO = 'jingjiangze/stronghold-scout';
           const me = Number(process.env.RUN_ID);
-          const ageMin = (iso) => (Date.now() - Date.parse(iso)) / 60000;
+          // GitHub 的 created_at 本身就带 Z，别再拼一次（拼了 Date.parse 出 NaN，阈值判定永远不成立）
+          const ageMin = (iso) => (Date.now() - Date.parse(String(iso).replace(/Z$/, '') + 'Z')) / 60000;
           let runs = [];
           try {
             const d = await (await fetch(`https://api.github.com/repos/${REPO}/actions/runs?per_page=20`, { headers: H, signal: AbortSignal.timeout(20000) })).json();
@@ -170,8 +171,9 @@ jobs:
           } catch (e) { console.log(`tick: 读 run 列表失败，不补投（${String(e.message || e).slice(0, 60)}）`); process.exit(0); }
           if (!runs.length) { console.log('tick: 本仓没有历史 run，跳过补投'); process.exit(0); }
           const prev = runs[0];
-          const gap = ageMin(prev.created_at + 'Z');
-          const in6h = runs.filter((r) => ageMin(r.created_at + 'Z') < 360).length;
+          const gap = ageMin(prev.created_at);
+          if (!Number.isFinite(gap)) { console.log(`tick: 上一轮时间解析失败（${prev.created_at}），不补投`); process.exit(1); }
+          const in6h = runs.filter((r) => ageMin(r.created_at) < 360).length;
           // 月度分钟预算用光时别再补投（下一轮会被守门秒退，白烧开机时间）
           let budgetOut = false;
           try {
