@@ -32,6 +32,10 @@ on:
         description: 'fork README 最多扫多少个（留空=15）'
         type: string
         default: ''
+      tick_min:
+        description: '补投阈值分钟数（留空=90；上一轮超过它没跑就补投一轮）'
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -44,6 +48,8 @@ jobs:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'crawl')
     permissions:
       contents: read
+      # 给最后那步 Tick 用：允许用作业自带的 GITHUB_TOKEN 往本仓补投一轮，不引入任何新凭据
+      actions: write
     runs-on: ubuntu-latest
     timeout-minutes: 14
     steps:
@@ -137,6 +143,58 @@ jobs:
           console.log(L.join('\n'));
           JS
           node sum.js
+
+      # 缺勤补投：GitHub 对私密仓的 schedule 命中率实测很差（10-05 装上每小时 cron 后
+      # 期望 ~7 轮只打了 2 轮，01:13/02:13/03:13/04:13 全缺），而 workflow_dispatch 是 100% 可靠。
+      # 所以每轮结尾看一眼"上一轮离现在多久没跑"，超阈值就用本作业的 GITHUB_TOKEN 补投一轮。
+      # 反级联是天然的：补投出去的那一轮几分钟后就起跑，它自己再查时距上一轮只有几分钟，不满足阈值，
+      # 链条停在那儿 —— 也就是说这是"缺勤补一轮"，不是持续闹钟；持续节拍靠盒子那边的 ticker。
+      - name: Tick（缺勤补投）
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          THRESHOLD_MIN: ${{ github.event.inputs.tick_min }}
+        run: |
+          cat > tick.mjs <<'JS'
+          const TH = Number(process.env.THRESHOLD_MIN || 90);
+          const H = { authorization: 'Bearer ' + process.env.GH_TOKEN,
+            accept: 'application/vnd.github+json', 'user-agent': 'scout-tick', 'content-type': 'application/json' };
+          const REPO = 'jingjiangze/stronghold-scout';
+          const me = Number(process.env.RUN_ID);
+          const ageMin = (iso) => (Date.now() - Date.parse(iso)) / 60000;
+          let runs = [];
+          try {
+            const d = await (await fetch(`https://api.github.com/repos/${REPO}/actions/runs?per_page=20`, { headers: H, signal: AbortSignal.timeout(20000) })).json();
+            runs = (d.workflow_runs || []).filter((r) => /scout-schedule/.test(r.path || '') && r.id !== me);
+          } catch (e) { console.log(`tick: 读 run 列表失败，不补投（${String(e.message || e).slice(0, 60)}）`); process.exit(0); }
+          if (!runs.length) { console.log('tick: 本仓没有历史 run，跳过补投'); process.exit(0); }
+          const prev = runs[0];
+          const gap = ageMin(prev.created_at + 'Z');
+          const in6h = runs.filter((r) => ageMin(r.created_at + 'Z') < 360).length;
+          // 月度分钟预算用光时别再补投（下一轮会被守门秒退，白烧开机时间）
+          let budgetOut = false;
+          try {
+            const fs = await import('node:fs');
+            if (fs.existsSync('scout-report.json')) {
+              const r = JSON.parse(fs.readFileSync('scout-report.json', 'utf8'));
+              budgetOut = !!(r.skipped && /预算/.test(String(r.reason || '')));
+            }
+          } catch { /* 读不到就算了 */ }
+          const verdict = (v, why) => { console.log(`tick: ${v} :: ${why}（阈值 ${TH} 分钟；近 6 小时 ${in6h} 轮）`); return v === '补投'; };
+          if (budgetOut) { console.log('tick: 月度分钟预算已用完，不补投'); process.exit(0); }
+          if (gap >= TH) {
+            const res = await fetch(`https://api.github.com/repos/${REPO}/actions/workflows/scout-schedule.yml/dispatches`, {
+              method: 'POST', headers: H,
+              body: JSON.stringify({ ref: 'main', inputs: { target: 'crawl', dry: false, pages: '', forks: '', tick_min: '' } }),
+            });
+            console.log(verdict(res.status === 204 ? '补投' : '不补投', `距上一轮 ${Math.round(gap)} 分钟（上一轮 ${prev.id} ${prev.event}/${prev.created_at}）→ dispatch http=${res.status}`));
+            if (res.status !== 204) console.log((await res.text()).slice(0, 300));
+          } else {
+            console.log(verdict('不补投', `距上一轮只有 ${Math.round(gap)} 分钟，调度看起来正常`));
+          }
+          JS
+          node tick.mjs
 
   # 手工兜底：让 Worker 自己跑一轮（评论渠道在它那个出口是废的，只当备用）
   sweep:
