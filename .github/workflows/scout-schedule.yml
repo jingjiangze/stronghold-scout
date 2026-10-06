@@ -96,7 +96,7 @@ jobs:
         run: |
           echo "- 守门跳过：${{ steps.gate.outputs.why }}（本轮没发采集请求）" >> "$GITHUB_STEP_SUMMARY"
           echo "本轮跳过：${{ steps.gate.outputs.why }}"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.gate.outputs.due == 'true'
       - name: Run scout on Actions egress
         if: steps.gate.outputs.due == 'true'
