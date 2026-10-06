@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # 采集核是零依赖 .mjs（wrangler 在本机跑），仓库里可跟踪的只有 actions/checkout
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+      day: monday
+      time: "18:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
