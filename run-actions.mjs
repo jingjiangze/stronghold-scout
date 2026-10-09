@@ -7,7 +7,10 @@
    `/ingest`，那边只做 submit → approve → 补签 → PUT。台账托管在 Worker 的 R2（`/ledger`）。
 
    需要的环境变量：
-     SCOUT_WORKER   Worker 根地址，默认 https://stronghold-scout.yuehuibu5561.workers.dev
+     SCOUT_WORKER   投递与台账的根地址，默认 https://dl.jiangjiangze.icu
+                    （原来是 Cloudflare Worker 的 *.workers.dev —— 那个账户的经典 Worker
+                     从 2026-10-06 20:27Z 起一律 error 1101，站点侧 Pages Functions 正常，
+                     所以 /ingest 与 /ledger 搬进了 dl-site，路径与口令头都不变）
      SCOUT_TOKEN    口令（同时用于 /ingest 与 /ledger）
      BILI_COOKIE    评论区翻页用的登录票据；没有就退化成「未登录只看 3 条主楼」
      DRY=1          只发现不投递
@@ -15,7 +18,7 @@
 import fs from 'node:fs';
 import { runScout, biliHeaders, watchServers, DEFAULTS } from './scout.mjs';
 
-const WORKER = (process.env.SCOUT_WORKER || 'https://stronghold-scout.yuehuibu5561.workers.dev').replace(/\/+$/, '');
+const WORKER = (process.env.SCOUT_WORKER || 'https://dl.jiangjiangze.icu').replace(/\/+$/, '');
 const KEY = process.env.SCOUT_TOKEN || '';
 const DRY = process.env.DRY === '1';
 if (!KEY) { console.error('缺 SCOUT_TOKEN'); process.exit(2); }

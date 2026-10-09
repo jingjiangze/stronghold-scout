@@ -62,7 +62,7 @@ jobs:
           CK: ${{ secrets.BILI_COOKIE }}
         run: |
           cat > gate.mjs <<'JS'
-          const W = 'https://stronghold-scout.yuehuibu5561.workers.dev';
+          const W = 'https://dl.jiangjiangze.icu';   // 台账搬到站点：Worker 那条 workers.dev 从 10-06 起整账户 1101
           const K = process.env.SCOUT_KEY, CK = process.env.CK || '';
           const UA = { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             referer: 'https://www.bilibili.com/', accept: 'application/json', ...(CK ? { cookie: CK } : {}) };
