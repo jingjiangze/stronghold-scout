@@ -19,6 +19,8 @@ import fs from 'node:fs';
 import { runScout, biliHeaders, watchServers, DEFAULTS } from './scout.mjs';
 
 const WORKER = (process.env.SCOUT_WORKER || 'https://dl.jiangjiangze.icu').replace(/\/+$/, '');
+// 台账的只读备胎：R2 桶的自定义域，不经 Pages Functions，出口抖的时候这一跳往往还在。
+const LEDGER_BACKUP_URL = process.env.SCOUT_STATE_URL || 'https://weishucdn.jiangjiangze.icu/scout/state.json';
 const KEY = process.env.SCOUT_TOKEN || '';
 const DRY = process.env.DRY === '1';
 if (!KEY) { console.error('缺 SCOUT_TOKEN'); process.exit(2); }
@@ -27,17 +29,36 @@ const hdr = { 'x-scout-key': KEY, 'content-type': 'application/json', accept: 'a
 const timed = (init) => ({ ...init, signal: (init && init.signal) || AbortSignal.timeout(90000) });
 
 async function loadLedger() {
-  try {
-    const res = await fetch(`${WORKER}/ledger`, { headers: hdr, signal: AbortSignal.timeout(30000) });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const s = await res.json();
-    if (!s || typeof s !== 'object') throw new Error('空');
-    return { seen: {}, submitted: {}, candidates: {}, ...s };
-  } catch (e) { console.log('[actions] 台账读不到，按空台账起跑：', String(e.message).slice(0, 60)); return { seen: {}, submitted: {}, candidates: {} }; }
+  // 两次机会：站点侧 /ledger（走 Functions，能读能写）与 R2 公共域名（只读，但不经函数、更稳）。
+  // 只试一次的话，出口抖一下就会"按空台账起跑"，然后照实回写 —— 10-11 本地跑一轮就把 5 天的
+  // 候选池从 29 条覆盖成 12 条，事后只能靠事先留的备份并集修回去。
+  const attempts = [
+    () => fetch(`${WORKER}/ledger`, { headers: hdr, signal: AbortSignal.timeout(30000) })
+      .then(async (res) => { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); }),
+    () => fetch(`${LEDGER_BACKUP_URL}?cb=${Date.now()}`, { signal: AbortSignal.timeout(30000) })
+      .then(async (res) => { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); }),
+  ];
+  for (const [i, attempt] of attempts.entries()) {
+    try {
+      const s = await attempt();
+      if (!s || typeof s !== 'object') throw new Error('空');
+      if (i > 0) console.log('[actions] 台账从只读域名取回（/ledger 那一跳没通）');
+      return { seen: {}, submitted: {}, candidates: {}, ...s };
+    } catch (e) {
+      console.log(`[actions] 台账第 ${i + 1} 次读不到：`, String(e.message).slice(0, 60));
+    }
+  }
+  // 一次都没读到：标记出来，saveLedger 会拒绝覆盖（空台账只能当"这轮不写"，不能当"历史是空的"）
+  return { seen: {}, submitted: {}, candidates: {}, __unreadable: true };
 }
 
 async function saveLedger(state) {
-  const body = JSON.stringify(state);
+  if (state.__unreadable) {
+    console.log('[actions] 台账这轮没读成功，拒绝回写 —— 否则会把历史覆盖成空池（下一轮从只读域名再试）');
+    return;
+  }
+  const { __unreadable, ...bodyObj } = state;
+  const body = JSON.stringify(bodyObj);
   const res = await fetch(`${WORKER}/ledger`, { ...timed({ method: 'POST', headers: hdr, body }) }).catch(() => null);
   const j = res ? await res.json().catch(() => ({})) : {};
   console.log(`[actions] 台账回写 ${res && res.status} ${body.length}B ${j.ok ? '' : JSON.stringify(j).slice(0, 80)}`);
