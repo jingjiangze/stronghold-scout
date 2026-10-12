@@ -25,6 +25,10 @@ on:
         description: '只发现和校验，不投递（仅 crawl/run 有效）'
         type: boolean
         default: false
+      now:
+        description: '无视「一天一轮」的静默窗，立刻真跑（只对手工触发有效）'
+        type: boolean
+        default: false
       pages:
         description: '评论区翻到第几页（留空=12；加深有触发 B 站风控的风险）'
         type: string
@@ -61,6 +65,7 @@ jobs:
         env:
           SCOUT_KEY: ${{ secrets.SCOUT_TOKEN }}
           CK: ${{ secrets.BILI_COOKIE }}
+          GATE_FORCE: ${{ github.event.inputs.now == 'true' && '1' || '' }}
         run: |
           cat > gate.mjs <<'JS'
           const W = 'https://dl.jiangjiangze.icu';   // 台账搬到站点：Worker 那条 workers.dev 从 10-06 起整账户 1101
@@ -69,6 +74,8 @@ jobs:
             referer: 'https://www.bilibili.com/', accept: 'application/json', ...(CK ? { cookie: CK } : {}) };
           const now = Date.now();
           let due = true, why = '兜底：默认跑';
+          // 手工勾了「立刻真跑」就跳过下面所有静默窗（一天一轮是自动节拍的口径，不是人的口径）
+          const FORCE = process.env.GATE_FORCE === '1';
           try {
             const cj = await (await fetch('https://api.bilibili.com/x/v2/reply/count?type=1&oid=117371003995662', { headers: UA, signal: AbortSignal.timeout(12000) })).json();
             const count = Number(cj && cj.data && (cj.data.count ?? cj.data.total));
@@ -78,7 +85,8 @@ jobs:
             const m = s.meter && s.meter.month === new Date().toISOString().slice(0, 7) ? s.meter : { minutes: 0 };
             const GAP_H = Number(process.env.SCOUT_MIN_GAP_HOURS) || 20;
             const lastRun = Date.parse(s.lastRun || "");
-            if (Number.isFinite(lastRun) && now - lastRun < GAP_H * 3600e3) { due = false; why = `距上次采集 ${Math.round((now - lastRun) / 3600000)} 小时 < ${GAP_H} 小时（一天一轮）`; }
+            if (FORCE) { due = true; why = '手工强制：忽略一天一轮与静默窗'; }
+            else if (Number.isFinite(lastRun) && now - lastRun < GAP_H * 3600e3) { due = false; why = `距上次采集 ${Math.round((now - lastRun) / 3600000)} 小时 < ${GAP_H} 小时（一天一轮）`; }
             else if (m.minutes >= bud) { due = false; why = `本月分钟预算已用完（${Math.round(m.minutes)}/${bud}）`; }
             else if (!Number.isFinite(count) || count === 0) { why = '评论数不可用'; }
             else if (!prev || count !== prev) { due = true; why = `评论数 ${prev} → ${count}`; }
