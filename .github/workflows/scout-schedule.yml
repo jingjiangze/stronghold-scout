@@ -12,8 +12,9 @@ on:
     # 每小时一次，:13 分触发（GitHub 整点调度最拥堵，会延迟几分钟）。
     # 频率不再靠拍脑袋定：作业自己按月度分钟预算记账（默认 1400 / 免费 2000），
     # 用满就自动降级成空转跳过，避免超额后 GitHub 静默停掉 schedule。
-    # 2026-10-12 用户改口径：采集**一天一次**（站点 /api/tick 那边另有一道 22 小时节流，两头都卡）
-    - cron: '13 9 * * *'
+    # 2026-10-12 用户改口径：采集**一天两次**（09:13 / 21:13 UTC = 17:13 / 05:13 北京）。
+    # cron 落在 :13、盒子的闹钟落在 :26 —— 每一格都由 cron 先抢到，盒子那 23 拍会被站点节流。
+    - cron: '13 9,21 * * *'
   workflow_dispatch:
     inputs:
       target:
@@ -26,7 +27,7 @@ on:
         type: boolean
         default: false
       now:
-        description: '无视「一天一轮」的静默窗，立刻真跑（只对手工触发有效）'
+        description: '无视「一天两次」的静默窗，立刻真跑（只对手工触发有效）'
         type: boolean
         default: false
       pages:
@@ -38,7 +39,7 @@ on:
         type: string
         default: ''
       tick_min:
-        description: '补投阈值分钟数（留空=90；上一轮超过它没跑就补投一轮）'
+        description: '补投阈值分钟数（留空=720，即一天两次；上一轮超过它没跑就补投一轮）'
         type: string
         default: ''
 
@@ -74,7 +75,7 @@ jobs:
             referer: 'https://www.bilibili.com/', accept: 'application/json', ...(CK ? { cookie: CK } : {}) };
           const now = Date.now();
           let due = true, why = '兜底：默认跑';
-          // 手工勾了「立刻真跑」就跳过下面所有静默窗（一天一轮是自动节拍的口径，不是人的口径）
+          // 手工勾了「立刻真跑」就跳过下面所有静默窗（一天两次是自动节拍的口径，不是人的口径）
           const FORCE = process.env.GATE_FORCE === '1';
           try {
             const cj = await (await fetch('https://api.bilibili.com/x/v2/reply/count?type=1&oid=117371003995662', { headers: UA, signal: AbortSignal.timeout(12000) })).json();
@@ -83,10 +84,10 @@ jobs:
             const prev = Number(s.biliCount) || 0;
             const bud = Number(process.env.ACTIONS_MINUTE_BUDGET || 1400);
             const m = s.meter && s.meter.month === new Date().toISOString().slice(0, 7) ? s.meter : { minutes: 0 };
-            const GAP_H = Number(process.env.SCOUT_MIN_GAP_HOURS) || 20;
+            const GAP_H = Number(process.env.SCOUT_MIN_GAP_HOURS) || 11.5;
             const lastRun = Date.parse(s.lastRun || "");
-            if (FORCE) { due = true; why = '手工强制：忽略一天一轮与静默窗'; }
-            else if (Number.isFinite(lastRun) && now - lastRun < GAP_H * 3600e3) { due = false; why = `距上次采集 ${Math.round((now - lastRun) / 3600000)} 小时 < ${GAP_H} 小时（一天一轮）`; }
+            if (FORCE) { due = true; why = '手工强制：忽略一天两次与静默窗'; }
+            else if (Number.isFinite(lastRun) && now - lastRun < GAP_H * 3600e3) { due = false; why = `距上次采集 ${Math.round((now - lastRun) / 3600000)} 小时 < ${GAP_H} 小时（一天两次）`; }
             else if (m.minutes >= bud) { due = false; why = `本月分钟预算已用完（${Math.round(m.minutes)}/${bud}）`; }
             else if (!Number.isFinite(count) || count === 0) { why = '评论数不可用'; }
             else if (!prev || count !== prev) { due = true; why = `评论数 ${prev} → ${count}`; }
@@ -169,7 +170,7 @@ jobs:
           THRESHOLD_MIN: ${{ github.event.inputs.tick_min }}
         run: |
           cat > tick.mjs <<'JS'
-          const TH = Number(process.env.THRESHOLD_MIN || 1500);   // 一天一轮：上一轮超过 25 小时没跑才补投
+          const TH = Number(process.env.THRESHOLD_MIN || 720);   // 一天两次：上一轮超过 12 小时没跑才补投
           const H = { authorization: 'Bearer ' + process.env.GH_TOKEN,
             accept: 'application/vnd.github+json', 'user-agent': 'scout-tick', 'content-type': 'application/json' };
           const REPO = 'jingjiangze/stronghold-scout';
