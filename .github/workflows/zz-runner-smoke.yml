@@ -1,0 +1,14 @@
+name: runner-smoke
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: echo
+        run: echo "runner ok: $(date -u +%FT%TZ)"
