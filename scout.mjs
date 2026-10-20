@@ -144,15 +144,87 @@ function linksIn(text, into) {
 const unesc = s => String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
 
 /* 判断一个 URL 是不是游戏客户端本体（而不是状态页/落地页）：
-   上游 index.html 里同时有 viewport-fit=cover、/vendor/ 资源、STRONGHOLD PROTOCOL 标题。 */
+   上游 index.html 里同时有 viewport-fit=cover、/vendor/ 资源、STRONGHOLD PROTOCOL 标题。
+   顺手把页面自称读出来：<title> 或 og:site_name 往往是玩家给这台服起的中文名，
+   比拿主机名当名字好得多（2026-10-20：用户要求名称不能直接是域名）。 */
 const CLIENT_MARKERS = [/viewport-fit=cover/i, /\/vendor\//i, /STRONGHOLD PROTOCOL/i];
+
+/**
+ * 给一条自动发现的候选起名。优先级（2026-10-20 用户口径：**名称不能直接是域名**）：
+ *   ① 服务器页面自称（og:site_name / <title> 洗出来的牌子）；
+ *   ② 主机名的「牌子」部分（去掉域名后缀，如 ark.sakusky.com → ark），再带「待核」；
+ *   ③ 主机名首段是通用前缀（www / sp / api / play…）或纯数字（IP）→ 退回完整主机名 + 「待核」。
+ * 域名只在③出现一次，且一定带「待核」——不再是「拿域名冒充服名」。
+ *
+ * 为什么不从「发现渠道的文本」里取名：实测各渠道的 source 只是渠道标签
+ * （`B站公开位（置顶/简介/相关）` / `候选台账`），并不带玩家写的中文名，
+ * 那条路取不到东西（2026-10-20 验证过四种渠道的 source 全是标签）。
+ * 真要拿中文名，得改渠道把 URL 周围的文本一起带回来 —— 那是另一件事。
+ *
+ * @param {string} origin 候选 origin
+ * @param {{title?:string}} resolved resolveServer 的结果（带页面自称）
+ */
+function entryName(origin, resolved, source) {
+  let host = '';
+  try { host = new URL(origin).hostname; } catch { /* ignore */ }
+  const fromPage = cleanTitle(resolved && resolved.title);
+  if (fromPage) return fromPage;
+  const label = host.split('.')[0] || '';
+  // 主机名首段得像个名字：不是通用前缀、不是纯数字、含字母或汉字
+  const generic = /^(www|web|sp|game|play|server|srv|api|app|m|test|node|main|home|panel|status|health)$/i;
+  if (label.length >= 2 && !generic.test(label) && !/^\d+$/.test(label) && /[A-Za-z\u4e00-\u9fa5]/.test(label)) {
+    return `${label}（待核）`;
+  }
+  return `${host}（待核）`;
+}
+
+/* 去 HTML 标签 + 实体、压空白 —— 只用于把一个页面标题洗成可读名字。 */
+function textOf(raw) {
+  return String(raw || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&[a-z]+;/gi, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+/* 页面上「像牌子」的那一小块：去掉版本号 / 副标题 / 站名后缀这些噪声，留真正的服名。
+   还要挡住「没写标题」的页面：只留一个字母、纯数字、loading/error 这类占位都算没名字，
+   否则一台没标题的服会顶着 "x" 这种名字进清单（2026-10-20 端到端验证抓到过）。 */
+function cleanTitle(raw) {
+  let s = textOf(raw);
+  if (!s) return '';
+  s = s.split(/\s*[|｜·—–-]\s*/)[0].trim();          // 取第一段：主标题
+  s = s.replace(/\b(stronghold\s*protocol|lobby|联机|大厅|房间牌)\b/gi, ' ').trim();
+  s = s.replace(/[（(【\[]\s*[)）】\]]/g, '').replace(/\s{2,}/g, ' ').trim();
+  // 太短 / 纯数字 / 明显是占位符 → 当作「页面没说自己叫什么」
+  if (s.length < 2) return '';
+  if (/^\d+$/.test(s)) return '';
+  if (/^(loading|loaded|error|index|home|untitled|document|无标题|首页|加载中)$/i.test(s)) return '';
+  return s;
+}
+/** 服务器自己的自称：优先 og:site_name（站点身份），退化到 <title>。都不是则 ''。 */
+export function titleFromHtml(html) {
+  const s = String(html || '');
+  const og = s.match(/<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i)
+          || s.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:site_name["']/i);
+  const fromOg = cleanTitle(og && og[1]);
+  if (fromOg) return fromOg;
+  const t = s.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return cleanTitle(t && t[1]);
+}
+
+/** 抓到就是「是/不是客户端页」+ 页面自称名（name 可能是 ''）。 */
 export async function looksLikeClient(fetchImpl, url, timeoutMs) {
-  try {
-    const res = await fetchImpl(url, { headers: { 'user-agent': 'stronghold-scout/1', accept: 'text/html' } });
-    if (!res.ok) return false;
-    const html = (await res.text()).slice(0, 20000);
-    return CLIENT_MARKERS.filter(re => re.test(html)).length >= 2;
-  } catch { return false; }
+  let html = '';
+  const isClient = await (async () => {
+    try {
+      const res = await fetchImpl(url, { headers: { 'user-agent': 'stronghold-scout/1', accept: 'text/html' } });
+      if (!res.ok) return false;
+      html = (await res.text()).slice(0, 20000);
+      return CLIENT_MARKERS.filter(re => re.test(html)).length >= 2;
+    } catch { return false; }
+  })();
+  if (!isClient) return { client: false, name: '' };
+  return { client: true, name: titleFromHtml(html) };
 }
 
 /**
@@ -160,7 +232,7 @@ export async function looksLikeClient(fetchImpl, url, timeoutMs) {
  *   健康检查一律在站点根上找（/healthz、/api/status、/health 任选其一命中）；
  *   客户端本体可能挂在 /play 之类子路径（raiya 的根是状态页，/healthz 还被 nginx 403），
  *   所以再找挂载点，找不到就退回站点根。
- * 返回 { probePath, clientUrl } 或 null。
+ * 返回 { probePath, clientUrl, title } 或 null —— title 是服务器页面自称的名字（可能 ''）。
  */
 export async function resolveServer(fetchImpl, candidate, timeoutMs, probePaths, clientMounts) {
   const u = isPublicHttpUrl(candidate); if (!u) return null;
@@ -178,10 +250,12 @@ export async function resolveServer(fetchImpl, candidate, timeoutMs, probePaths,
   const tries = ownPath ? [ownPath, ...mounts.filter((m) => m !== ownPath)] : mounts;
   for (const mount of tries) {
     const url = origin + (mount === '/' ? '' : mount);
-    if (await looksLikeClient(fetchImpl, url || origin + '/', timeoutMs)) return { probePath, clientUrl: url, origin, clientVerified: true };
+    const seen = await looksLikeClient(fetchImpl, url || origin + '/', timeoutMs);
+    // 第一个「确实是客户端页」的挂载点才算入口；title 一起带回去当服名
+    if (seen.client) return { probePath, clientUrl: url, origin, clientVerified: true, title: seen.name || '' };
   }
   // 没验到客户端页：只是把候选自带的路径原样留着，调用方要靠 clientVerified 分辨
-  return { probePath, clientUrl: ownPath ? origin + ownPath : origin, origin, clientVerified: false };
+  return { probePath, clientUrl: ownPath ? origin + ownPath : origin, origin, clientVerified: false, title: '' };
 }
 
 /* ---- 渠道 ---- */
@@ -629,7 +703,7 @@ export async function runScout(options = {}) {
       report.upgradeSkipped = (report.upgradeSkipped || 0) + 1;
       continue;
     }
-    const entry = { id, name: `${new URL(origin).hostname}（待核）`, url: entryUrl, probe: resolved.probePath,
+    const entry = { id, name: entryName(origin, resolved, source), url: entryUrl, probe: resolved.probePath,
                     enabled: true, note: cleanNote(`自动发现 · ${source}`) };
     if (options.dryRun) { report.submitted.push({ ...entry, dryRun: true, verdict }); continue; }
     if (options.deliver) {
