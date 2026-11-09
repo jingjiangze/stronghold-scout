@@ -89,3 +89,11 @@ schtasks /Create /F /TN stronghold-scout /SC MINUTE /MO 30 ^
 ## 报告字段
 
 `discovered` 候选数、`verified` 通过指纹校验数、`submitted[]`（含队列 `queueId`）、`rejected[]`（失败原因）、`cooldown` 跳过、`deferred` 提交额度用尽顺延、`truncated` 超预算、`stateSize`。历史报告在 R2 `scout/last-report.json`，去重/缓存在 `scout/state.json`。
+
+## 许可
+
+本项目以 **GNU General Public License v3.0 或更新版本**（`GPL-3.0-or-later`）发布，全文见 [`LICENSE`](LICENSE)。
+
+Copyright (C) 2026 jingjiangze
+
+可以自由使用、修改与再分发；但**分发衍生作品时必须同样以 GPL-3.0-or-later 开源**，并提供对应源代码。本程序不提供任何担保。
